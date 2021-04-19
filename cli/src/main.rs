@@ -11,6 +11,7 @@ use redscript_compiler::source_map::{Files, SourceFilter};
 use redscript_compiler::Compiler;
 use redscript_decompiler::files::FileIndex;
 use redscript_decompiler::print::{write_definition, OutputMode};
+use redscript_decompiler::mkdocs::write_documentation;
 use simplelog::{TermLogger, TerminalMode};
 
 #[derive(Debug, Options)]
@@ -35,6 +36,8 @@ struct DecompileOpts {
     dump_files: bool,
     #[options(short = "v", help = "verbose output (include implicit conversions)")]
     verbose: bool,
+    #[options(short = "d", help = "create mkdocs documentation")]
+    docs: bool,
 }
 
 #[derive(Debug, Options)]
@@ -136,7 +139,13 @@ fn decompile(opts: DecompileOpts) -> Result<(), Error> {
                 }
             }
         }
-    } else {
+    }
+    else if opts.docs {
+        if let Err(err) = write_documentation(opts.output.as_path(), pool) {
+            log::error!("Failed to process documentation: {:?}", err);
+        }
+    }
+    else {
         let mut output = BufWriter::new(File::create(&opts.output)?);
 
         for (_, def) in pool.roots().filter(|(_, def)| {

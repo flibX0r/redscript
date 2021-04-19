@@ -10,6 +10,7 @@ use redscript::error::Error;
 
 pub mod files;
 pub mod print;
+pub mod mkdocs;
 
 pub struct Decompiler<'a> {
     code: CodeCursor<'a, Offset>,
