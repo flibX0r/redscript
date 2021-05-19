@@ -32,6 +32,7 @@ pub struct ClassSource {
     pub base: Option<Ident>,
     pub members: Vec<MemberSource>,
     pub pos: Pos,
+    pub is_struct: bool,
 }
 
 #[derive(Debug)]
@@ -261,9 +262,13 @@ peg::parser! {
 
         rule extends() -> Ident = keyword("extends") _ name:ident() { name }
 
+        pub rule struct_() -> ClassSource
+            = pos:pos() qualifiers:qualifiers() _ keyword("struct") _ name:ident() _ base:extends()? _ "{" _ members:member()**_ _ "}"
+            { ClassSource { qualifiers, name, base, members, pos, is_struct: true } }
+
         pub rule class() -> ClassSource
             = pos:pos() qualifiers:qualifiers() _ keyword("class") _ name:ident() _ base:extends()? _ "{" _ members:member()**_ _ "}"
-            { ClassSource { qualifiers, name, base, members, pos } }
+            { ClassSource { qualifiers, name, base, members, pos, is_struct: false } }
 
         rule member() -> MemberSource
             = fun:function() { MemberSource::Function(fun) }
@@ -284,6 +289,7 @@ peg::parser! {
 
         pub rule source_entry() -> SourceEntry
             = fun:function() { SourceEntry::Function(fun) }
+            / struct_:struct_() { SourceEntry::Class(struct_) }
             / class:class() { SourceEntry::Class(class) }
             / field:field() { SourceEntry::GlobalLet(field) }
             / enum_:enum_() { SourceEntry::Enum(enum_) }
@@ -425,7 +431,22 @@ mod tests {
         .unwrap();
         assert_eq!(
             format!("{:?}", module.entries),
-            r#"[Class(ClassSource { qualifiers: Qualifiers([Public]), name: Owned("A"), base: Some(Owned("IScriptable")), members: [Field(FieldSource { declaration: Declaration { annotations: [], qualifiers: Qualifiers([Private, Const]), name: Owned("m_field"), pos: Pos(53) }, type_: TypeName { name: Owned("Int32"), arguments: [] } }), Function(FunctionSource { declaration: Declaration { annotations: [], qualifiers: Qualifiers([Public]), name: Owned("GetField"), pos: Pos(104) }, type_: Some(TypeName { name: Owned("Int32"), arguments: [] }), parameters: [], body: Some(Seq { exprs: [Return(Some(Member(This(Pos(165)), Owned("m_field"), Pos(169))), Pos(158))] }) })], pos: Pos(0) })]"#
+            r#"[Class(ClassSource { qualifiers: Qualifiers([Public]), name: Owned("A"), base: Some(Owned("IScriptable")), members: [Field(FieldSource { declaration: Declaration { annotations: [], qualifiers: Qualifiers([Private, Const]), name: Owned("m_field"), pos: Pos(53) }, type_: TypeName { name: Owned("Int32"), arguments: [] } }), Function(FunctionSource { declaration: Declaration { annotations: [], qualifiers: Qualifiers([Public]), name: Owned("GetField"), pos: Pos(104) }, type_: Some(TypeName { name: Owned("Int32"), arguments: [] }), parameters: [], body: Some(Seq { exprs: [Return(Some(Member(This(Pos(165)), Owned("m_field"), Pos(169))), Pos(158))] }) })], pos: Pos(0), is_struct: false })]"#
+        );
+    }
+
+    #[test]
+    fn parse_simple_struct() {
+        let module = lang::module(
+            "public struct S {
+                public let field: Int32;
+             }",
+            Pos::ZERO,
+        )
+        .unwrap();
+        assert_eq!(
+            format!("{:?}", module.entries),
+            r#"[Class(ClassSource { qualifiers: Qualifiers([Public]), name: Owned("S"), base: None, members: [Field(FieldSource { declaration: Declaration { annotations: [], qualifiers: Qualifiers([Public]), name: Owned("field"), pos: Pos(34) }, type_: TypeName { name: Owned("Int32"), arguments: [] } })], pos: Pos(0), is_struct: true })]"#
         );
     }
 
@@ -514,7 +535,7 @@ mod tests {
         .unwrap();
         assert_eq!(
             format!("{:?}", module.entries),
-            r#"[Class(ClassSource { qualifiers: Qualifiers([]), name: Owned("Test"), base: None, members: [Field(FieldSource { declaration: Declaration { annotations: [], qualifiers: Qualifiers([Private]), name: Owned("m_field"), pos: Pos(130) }, type_: TypeName { name: Owned("String"), arguments: [] } })], pos: Pos(101) })]"#
+            r#"[Class(ClassSource { qualifiers: Qualifiers([]), name: Owned("Test"), base: None, members: [Field(FieldSource { declaration: Declaration { annotations: [], qualifiers: Qualifiers([Private]), name: Owned("m_field"), pos: Pos(130) }, type_: TypeName { name: Owned("String"), arguments: [] } })], pos: Pos(101), is_struct: false })]"#
         );
     }
 
@@ -532,7 +553,7 @@ mod tests {
         .unwrap();
         assert_eq!(
             format!("{:?}", module.entries),
-            r#"[Class(ClassSource { qualifiers: Qualifiers([]), name: Owned("Test"), base: None, members: [Field(FieldSource { declaration: Declaration { annotations: [], qualifiers: Qualifiers([Private]), name: Owned("m_field"), pos: Pos(114) }, type_: TypeName { name: Owned("String"), arguments: [] } })], pos: Pos(13) })]"#
+            r#"[Class(ClassSource { qualifiers: Qualifiers([]), name: Owned("Test"), base: None, members: [Field(FieldSource { declaration: Declaration { annotations: [], qualifiers: Qualifiers([Private]), name: Owned("m_field"), pos: Pos(114) }, type_: TypeName { name: Owned("String"), arguments: [] } })], pos: Pos(13), is_struct: false })]"#
         );
     }
 

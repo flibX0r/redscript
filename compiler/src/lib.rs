@@ -272,7 +272,8 @@ impl<'a> Compiler<'a> {
     ) -> Result<(), Error> {
         let flags = ClassFlags::new()
             .with_is_abstract(source.qualifiers.contain(Qualifier::Abstract))
-            .with_is_final(source.qualifiers.contain(Qualifier::Final));
+            .with_is_final(source.qualifiers.contain(Qualifier::Final))
+            .with_is_struct(source.is_struct);
         let mut functions = vec![];
         let mut fields = vec![];
 
@@ -921,6 +922,16 @@ mod tests {
     }
 
     #[test]
+    fn compile_simple_struct() -> Result<(), Error> {
+        let sources = "
+            public struct S {
+                public let m_field: Int32;
+            }";
+
+        check_compilation(sources)
+    }
+
+    #[test]
     fn compile_class_with_forward_ref() -> Result<(), Error> {
         let sources = "
             public class MyTestClass456 {
@@ -1012,14 +1023,18 @@ mod tests {
             public abstract class Base {}
 
             public final class Derived extends Base {}
+
+            public struct Struct {}
         "#;
 
         let expected_base_flags = ClassFlags::new().with_is_abstract(true);
         let expected_derived_flags = ClassFlags::new().with_is_final(true);
+        let expected_struct_flags = ClassFlags::new().with_is_struct(true);
 
         let pool = check_compilation_pool(source)?;
         check_class_flags(&pool, "Base", expected_base_flags)?;
         check_class_flags(&pool, "Derived", expected_derived_flags)?;
+        check_class_flags(&pool, "Struct", expected_struct_flags)?;
         Ok(())
     }
 
