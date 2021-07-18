@@ -4,6 +4,7 @@ use std::str::FromStr;
 
 use redscript::ast::{BinOp, Constant, Expr, Ident, Literal, Seq, SourceAst, SwitchCase, UnOp};
 use redscript::bundle::ConstantPool;
+use redscript::bytecode::Instr;
 use redscript::definition::{AnyDefinition, Definition, Function, Type};
 use redscript::error::Error;
 
@@ -31,6 +32,13 @@ pub fn write_definition<W: Write>(
         AnyDefinition::Type(_) => write!(out, "{}", format_type(definition, pool)?)?,
         AnyDefinition::Class(class) => {
             writeln!(out)?;
+
+            if matches!(mode, OutputMode::Bytecode) {
+                let flag_bytes = class.flags.into_bytes();
+                writeln!(out, "// Class Flags: {:08b} {:08b}", flag_bytes[1], flag_bytes[0])?;
+                writeln!(out, "// {:?}", class.flags)?;
+            }
+
             write!(out, "{} ", class.visibility)?;
             if class.flags.is_abstract() {
                 write!(out, "abstract ")?;
@@ -75,6 +83,12 @@ pub fn write_definition<W: Write>(
         }
         AnyDefinition::Enum(enum_) => {
             writeln!(out)?;
+
+            if matches!(mode, OutputMode::Bytecode) {
+                writeln!(out, "// Enum Flags: {:08b}", enum_.flags)?;
+                writeln!(out, "// {:?}", enum_.flags)?;
+            }
+
             writeln!(out, "enum {} {{", pool.names.get(definition.name)?)?;
 
             for member in &enum_.members {
@@ -100,6 +114,13 @@ pub fn write_definition<W: Write>(
                 .join(", ");
 
             writeln!(out)?;
+
+            if matches!(mode, OutputMode::Bytecode) {
+                let flag_bytes = fun.flags.into_bytes();
+                writeln!(out, "{}// Func Flags: {:08b} {:08b} {:08b} {:08b}", padding, flag_bytes[3], flag_bytes[2], flag_bytes[1], flag_bytes[0])?;
+                writeln!(out, "// {:?}", fun.flags)?;
+            }
+
             write!(out, "{}{} ", padding, fun.visibility)?;
             if fun.flags.is_final() {
                 write!(out, "final ")?;
@@ -130,6 +151,12 @@ pub fn write_definition<W: Write>(
         AnyDefinition::Local(local) => {
             let type_name = format_type(pool.definition(local.type_)?, pool)?;
             let name = pool.names.get(definition.name)?;
+
+            if matches!(mode, OutputMode::Bytecode) {
+                writeln!(out, "{}// Local Flags: {:08b}", padding, local.flags.into_bytes()[0])?;
+                writeln!(out, "// {:?}", local.flags)?;
+            }
+
             write!(out, "{}", padding)?;
             if local.flags.is_const() {
                 write!(out, "const ")?;
@@ -143,6 +170,13 @@ pub fn write_definition<W: Write>(
             let field_name = pool.names.get(definition.name)?;
 
             writeln!(out)?;
+
+            if matches!(mode, OutputMode::Bytecode) {
+                let flag_bytes = field.flags.into_bytes();
+                writeln!(out, "{}// Field Flags: {:08b} {:08b}", padding, flag_bytes[1], flag_bytes[0])?;
+                writeln!(out, "// {:?}", field.flags)?;
+            }
+
             for property in &field.attributes {
                 writeln!(out, "{}@attrib({}, \"{}\")", padding, property.name, property.value)?;
             }
@@ -203,7 +237,13 @@ fn write_function_body<W: Write>(
             }
             for (offset, instr) in fun.code.cursor() {
                 let op = format!("{:?}", instr).to_lowercase();
-                writeln!(out, "{}{}: {}", INDENT.repeat(depth + 1), offset.value, op)?;
+                let comment = match instr {
+                    Instr::InvokeStatic(_, _, fn_idx) => {
+                        format!(" // {}", pool.definition_name(fn_idx).unwrap())
+                    },
+                    _ => String::from("")
+                };
+                writeln!(out, "{}{}: {}{}", INDENT.repeat(depth + 1), offset.value, op, comment)?;
             }
         }
     }
