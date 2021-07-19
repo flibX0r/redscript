@@ -118,7 +118,7 @@ pub fn write_definition<W: Write>(
             if matches!(mode, OutputMode::Bytecode) {
                 let flag_bytes = fun.flags.into_bytes();
                 writeln!(out, "{}// Func Flags: {:08b} {:08b} {:08b} {:08b}", padding, flag_bytes[3], flag_bytes[2], flag_bytes[1], flag_bytes[0])?;
-                writeln!(out, "// {:?}", fun.flags)?;
+                writeln!(out, "{}// {:?}", padding, fun.flags)?;
             }
 
             write!(out, "{}{} ", padding, fun.visibility)?;
@@ -154,7 +154,7 @@ pub fn write_definition<W: Write>(
 
             if matches!(mode, OutputMode::Bytecode) {
                 writeln!(out, "{}// Local Flags: {:08b}", padding, local.flags.into_bytes()[0])?;
-                writeln!(out, "// {:?}", local.flags)?;
+                writeln!(out, "{}// {:?}", padding, local.flags)?;
             }
 
             write!(out, "{}", padding)?;
@@ -174,7 +174,7 @@ pub fn write_definition<W: Write>(
             if matches!(mode, OutputMode::Bytecode) {
                 let flag_bytes = field.flags.into_bytes();
                 writeln!(out, "{}// Field Flags: {:08b} {:08b}", padding, flag_bytes[1], flag_bytes[0])?;
-                writeln!(out, "// {:?}", field.flags)?;
+                writeln!(out, "{}// {:?}", padding, field.flags)?;
             }
 
             for property in &field.attributes {
@@ -237,12 +237,7 @@ fn write_function_body<W: Write>(
             }
             for (offset, instr) in fun.code.cursor() {
                 let op = format!("{:?}", instr).to_lowercase();
-                let comment = match instr {
-                    Instr::InvokeStatic(_, _, fn_idx) => {
-                        format!(" // {}", pool.definition_name(fn_idx).unwrap())
-                    },
-                    _ => String::from("")
-                };
+                let comment = format_instr(&instr, pool);
                 writeln!(out, "{}{}: {}{}", INDENT.repeat(depth + 1), offset.value, op, comment)?;
             }
         }
@@ -540,4 +535,41 @@ enum ParentOp {
     UnOp(UnOp),
     BinOp(BinOp),
     Dot,
+}
+
+fn format_instr<L>(instr: &Instr<L>, pool: &ConstantPool) -> String {
+    match instr {
+        Instr::NameConst(name) => {
+            format!(" // {}", pool.definition_name(*name).unwrap())
+        },
+        Instr::EnumConst(enum_, value) => {
+            format!(" // {} = {}", pool.definition_name(*enum_).unwrap(), pool.enum_value(*value).unwrap())
+        },
+        Instr::TweakDbIdConst(tdbid) => {
+            format!(" // {}", pool.definition_name(*tdbid).unwrap())
+        },
+        Instr::ResourceConst(res) => {
+            format!(" // {}", pool.definition_name(*res).unwrap())
+        },
+        Instr::Local(local) => {
+            format!(" // {}", pool.definition_name(*local).unwrap())
+        },
+        Instr::Param(param) => {
+            format!(" // {}", pool.definition_name(*param).unwrap())
+        },
+        Instr::ObjectField(field) => {
+            format!(" // {}", pool.definition_name(*field).unwrap())
+        },
+        Instr::InvokeStatic(_, _, fn_static) => {
+            format!(" // {}", pool.definition_name(*fn_static).unwrap())
+        },
+        Instr::InvokeVirtual(_, _, fn_virtual) => {
+            format!(" // {}", pool.definition_name(*fn_virtual).unwrap())
+        },
+        Instr::StructField(field) => {
+            let parent = pool.definition(*field).unwrap().parent;
+            format!(" // {}.{}", pool.definition_name(parent).unwrap(), pool.definition_name(*field).unwrap())
+        },
+        _ => String::from("")
+    }
 }
