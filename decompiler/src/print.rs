@@ -86,7 +86,6 @@ pub fn write_definition<W: Write>(
 
             if matches!(mode, OutputMode::Bytecode) {
                 writeln!(out, "// Enum Flags: {:08b}", enum_.flags)?;
-                writeln!(out, "// {:?}", enum_.flags)?;
             }
 
             writeln!(out, "enum {} {{", pool.names.get(definition.name)?)?;
@@ -116,9 +115,17 @@ pub fn write_definition<W: Write>(
             writeln!(out)?;
 
             if matches!(mode, OutputMode::Bytecode) {
+                writeln!(out, "{}// Full Name: {}", padding, name)?;
                 let flag_bytes = fun.flags.into_bytes();
                 writeln!(out, "{}// Func Flags: {:08b} {:08b} {:08b} {:08b}", padding, flag_bytes[3], flag_bytes[2], flag_bytes[1], flag_bytes[0])?;
                 writeln!(out, "{}// {:?}", padding, fun.flags)?;
+                for def in fun.parameters.iter().map(|p| pool.definition(*p).unwrap()) {
+                    if let AnyDefinition::Parameter(ref param) = def.value {
+                        let name = pool.names.get(def.name)?;
+                        writeln!(out, "{}// Param '{}' Flags: {:08b}", padding, name, param.flags.into_bytes()[0])?;
+                        writeln!(out, "{}// {:?}", padding, param.flags)?;
+                    }
+                }
             }
 
             write!(out, "{}{} ", padding, fun.visibility)?;
@@ -566,10 +573,10 @@ fn format_instr<L>(instr: &Instr<L>, pool: &ConstantPool) -> String {
         Instr::ObjectField(field) => {
             format!(" // {}", pool.definition_name(*field).unwrap())
         },
-        Instr::InvokeStatic(_, _, fn_static) => {
+        Instr::InvokeStatic(_, _, fn_static, _) => {
             format!(" // {}", pool.definition_name(*fn_static).unwrap())
         },
-        Instr::InvokeVirtual(_, _, fn_virtual) => {
+        Instr::InvokeVirtual(_, _, fn_virtual, _) => {
             format!(" // {}", pool.definition_name(*fn_virtual).unwrap())
         },
         Instr::StructField(field) => {
