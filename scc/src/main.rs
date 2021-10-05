@@ -1,19 +1,21 @@
 use std::collections::HashSet;
 use std::fs::{self, File, OpenOptions};
-use std::io::{self, BufReader, BufWriter, SeekFrom};
+use std::io;
 use std::ops::DerefMut;
 use std::path::{Path, PathBuf};
 use std::time::SystemTime;
 
 use byteorder::{LittleEndian, ReadBytesExt, WriteBytesExt};
-use fd_lock::FdLock;
-use log::LevelFilter;
+use fd_lock::RwLock;
+use redscript::ast::Pos;
 use redscript::bundle::ScriptBundle;
 use redscript::error::Error;
 use redscript_compiler::source_map::{Files, SourceFilter};
-use redscript_compiler::Compiler;
-use serde_derive::Deserialize;
-use simplelog::{CombinedLogger, Config as LoggerConfig, SimpleLogger, WriteLogger};
+use redscript_compiler::unit::CompilationUnit;
+use serde::Deserialize;
+use time::format_description::well_known::Rfc3339 as Rfc3339Format;
+use time::OffsetDateTime;
+use vmap::Map;
 
 fn main() -> Result<(), Error> {
     // the way cyberpunk passes CLI args is broken, this is a workaround
@@ -22,41 +24,55 @@ fn main() -> Result<(), Error> {
         [cmd, path_str, ..] if cmd == "-compile" => {
             let script_dir = PathBuf::from(path_str.split('"').next().unwrap());
             let cache_dir = script_dir.parent().unwrap().join("cache");
-            start_logger(&cache_dir)?;
-            load_scripts(&script_dir, &cache_dir)
+            setup_logger(&cache_dir)?;
+            let manifest = ScriptManifest::load_with_fallback(&script_dir);
+            let files = Files::from_dir(&script_dir, manifest.source_filter())?;
+
+            match load_scripts(&cache_dir, &files) {
+                Ok(_) => {
+                    log::info!("Output successfully saved in {}", cache_dir.display());
+                }
+                Err(err) => {
+                    let content = error_message(err, &files, &script_dir);
+                    msgbox::create("Compilation error", &content, msgbox::IconType::Error).unwrap();
+                }
+            }
         }
         _ => {
             log::error!("Invalid arguments");
-            Ok(())
         }
     }
-}
-
-fn start_logger(cache_dir: &Path) -> Result<(), Error> {
-    let log_path = cache_dir.join("redscript.log");
-    CombinedLogger::init(vec![
-        SimpleLogger::new(LevelFilter::Info, LoggerConfig::default()),
-        WriteLogger::new(LevelFilter::Info, LoggerConfig::default(), File::create(log_path)?),
-    ])
-    .expect("Failed to initialize the logger");
     Ok(())
 }
 
-fn load_scripts(script_dir: &Path, cache_dir: &Path) -> Result<(), Error> {
+fn setup_logger(cache_dir: &Path) -> Result<(), Error> {
+    fern::Dispatch::new()
+        .format(move |out, message, rec| {
+            let time = OffsetDateTime::now_local().unwrap().format(&Rfc3339Format).unwrap();
+            out.finish(format_args!("{} [{}] {}", time, rec.level(), message));
+        })
+        .level(log::LevelFilter::Info)
+        .chain(io::stdout())
+        .chain(fern::log_file(cache_dir.join("redscript.log"))?)
+        .apply()
+        .expect("Failed to initialize the logger");
+
+    Ok(())
+}
+
+fn load_scripts(cache_dir: &Path, files: &Files) -> Result<(), Error> {
     let bundle_path = cache_dir.join("final.redscripts");
     let backup_path = cache_dir.join("final.redscripts.bk");
     let timestamp_path = cache_dir.join("redscript.ts");
 
-    let manifest = ScriptManifest::load_with_fallback(script_dir);
-
-    let mut ts_lock = FdLock::new(
+    let mut ts_lock = RwLock::new(
         OpenOptions::new()
             .read(true)
             .write(true)
             .create(true)
             .open(&timestamp_path)?,
     );
-    let mut ts_file = ts_lock.lock()?;
+    let mut ts_file = ts_lock.write()?;
     let write_timestamp = CompileTimestamp::of_cache_file(&File::open(&bundle_path)?)?;
     let saved_timestamp = CompileTimestamp::read(ts_file.deref_mut()).ok();
 
@@ -74,18 +90,19 @@ fn load_scripts(script_dir: &Path, cache_dir: &Path) -> Result<(), Error> {
         _ => {}
     }
 
-    let mut bundle: ScriptBundle = ScriptBundle::load(&mut BufReader::new(File::open(&backup_path)?))?;
-    let mut compiler = Compiler::new(&mut bundle.pool)?;
+    let (map, _) = Map::with_options()
+        .open(backup_path)
+        .map_err(|err| io::Error::new(io::ErrorKind::Other, err))?;
+    let mut bundle = ScriptBundle::load(&mut io::Cursor::new(map.as_ref()))?;
 
-    let files = Files::from_dir(script_dir, manifest.source_filter())?;
-    compiler.compile(&files)?;
+    CompilationUnit::new(&mut bundle.pool)?.compile(files)?;
+
     let mut file = File::create(&bundle_path)?;
-    bundle.save(&mut BufWriter::new(&mut file))?;
+    bundle.save(&mut io::BufWriter::new(&mut file))?;
     file.sync_all()?;
 
     CompileTimestamp::of_cache_file(&file)?.write(ts_file.deref_mut())?;
 
-    log::info!("Output successfully saved to {}", bundle_path.display());
     Ok(())
 }
 
@@ -96,13 +113,13 @@ struct CompileTimestamp {
 
 impl CompileTimestamp {
     fn read<R: io::Read + io::Seek>(input: &mut R) -> Result<Self, Error> {
-        input.seek(SeekFrom::Start(0))?;
+        input.seek(io::SeekFrom::Start(0))?;
         let nanos = input.read_u128::<LittleEndian>()?;
         Ok(CompileTimestamp { nanos })
     }
 
     fn write<W: io::Write + io::Seek>(&self, output: &mut W) -> Result<(), Error> {
-        output.seek(SeekFrom::Start(0))?;
+        output.seek(io::SeekFrom::Start(0))?;
         output.write_u128::<LittleEndian>(self.nanos)?;
         Ok(())
     }
@@ -135,7 +152,7 @@ impl ScriptManifest {
 
     pub fn load_with_fallback(script_dir: &Path) -> Self {
         Self::load(script_dir).unwrap_or_else(|err| {
-            log::info!("Could not load the manifest: {:?}, falling back to defaults", err);
+            log::info!("Could not load the manifest, falling back to defaults (caused by {})", err);
             Self::default()
         })
     }
@@ -143,4 +160,51 @@ impl ScriptManifest {
     pub fn source_filter(self) -> SourceFilter {
         SourceFilter::Exclude(self.exclusions)
     }
+}
+
+fn error_message(error: Error, files: &Files, scripts_dir: &Path) -> String {
+    fn detailed_message(positions: Vec<Pos>, files: &Files, scripts_dir: &Path) -> Option<String> {
+        let mut causes = HashSet::new();
+
+        for pos in positions {
+            let loc = files.lookup(pos)?;
+            let cause = loc
+                .file
+                .path()
+                .strip_prefix(scripts_dir)
+                .ok()
+                .and_then(|p| p.iter().next())
+                .unwrap_or_else(|| loc.file.path().as_os_str())
+                .to_string_lossy();
+
+            causes.insert(cause);
+        }
+
+        let causes = causes
+            .iter()
+            .map(|file| format!("- {}\n", file))
+            .fold(String::new(), |acc, el| acc + &el);
+
+        let msg = format!(
+            "This is caused by errors in:\n{}You can try updating or removing these scripts to resolve the issue. If you need more information, consult the logs.",
+            causes
+        );
+        Some(msg)
+    }
+
+    let str = match error {
+        Error::SyntaxError(_, pos) => detailed_message(vec![pos], files, scripts_dir).unwrap_or_default(),
+        Error::CompileError(_, pos) => detailed_message(vec![pos], files, scripts_dir).unwrap_or_default(),
+        Error::TypeError(_, pos) => detailed_message(vec![pos], files, scripts_dir).unwrap_or_default(),
+        Error::ResolutionError(_, pos) => detailed_message(vec![pos], files, scripts_dir).unwrap_or_default(),
+        Error::MultipleErrors(positions) => detailed_message(positions, files, scripts_dir).unwrap_or_default(),
+        Error::IoError(err) => format!("This is caused by an I/O error: {}", err),
+        Error::PoolError(err) => format!("This is caused by a constant pool error: {}", err),
+        _ => String::new(),
+    };
+
+    format!(
+        "REDScript compilation failed. The game will start, but none of the scripts will take effect. {}",
+        str
+    )
 }

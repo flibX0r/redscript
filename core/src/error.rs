@@ -1,16 +1,30 @@
 use std::fmt::{self, Display};
 use std::{io, usize};
 
+use thiserror::Error;
+
 use crate::ast::Pos;
 
-#[derive(Debug)]
+#[derive(Debug, Error)]
 pub enum Error {
-    IoError(io::Error),
+    #[error("I/O error")]
+    IoError(#[from] io::Error),
+    #[error("formatter error")]
+    FormatError(#[from] fmt::Error),
+    #[error("decompilation error: {0}")]
     DecompileError(String),
+    #[error("syntax error: {0}")]
     SyntaxError(String, Pos),
+    #[error("compilation error: {0}")]
     CompileError(String, Pos),
+    #[error("type error: {0}")]
+    TypeError(String, Pos),
+    #[error("function resolution error: {0}")]
+    ResolutionError(String, Pos),
+    #[error("constant pool error: {0}")]
     PoolError(String),
-    FormatError(fmt::Error),
+    #[error("multiple errors")]
+    MultipleErrors(Vec<Pos>),
 }
 
 impl Error {
@@ -52,6 +66,10 @@ impl Error {
         Error::CompileError(format!("Unresolved import {}", import), pos)
     }
 
+    pub fn unresolved_module<N: Display>(import: N, pos: Pos) -> Error {
+        Error::CompileError(format!("Module {} has no members or does not exist", import), pos)
+    }
+
     pub fn invalid_annotation_args(pos: Pos) -> Error {
         Error::CompileError("Invalid arguments for annotation".to_owned(), pos)
     }
@@ -90,16 +108,26 @@ impl Error {
 
     pub fn type_error<F: Display, T: Display>(from: F, to: T, pos: Pos) -> Error {
         let error = format!("Can't coerce {} to {}", from, to);
-        Error::CompileError(error, pos)
+        Error::TypeError(error, pos)
     }
 
     pub fn no_matching_overload<N: Display>(name: N, errors: &[FunctionResolutionError], pos: Pos) -> Error {
+        let max_errors = 10;
+        let messages = errors
+            .iter()
+            .take(max_errors)
+            .fold(String::new(), |acc, str| acc + "\n " + &str.0);
+
+        let detail = if errors.len() > max_errors {
+            format!("{}\n...and more", messages)
+        } else {
+            messages
+        };
         let error = format!(
             "Arguments passed to {} do not match any of the overloads:{}",
-            name,
-            errors.iter().fold(String::new(), |acc, str| acc + "\n " + &str.0)
+            name, detail
         );
-        Error::CompileError(error, pos)
+        Error::ResolutionError(error, pos)
     }
 
     pub fn invalid_intrinsic<N: Display, T: Display>(name: N, type_: T, pos: Pos) -> Error {
@@ -122,20 +150,13 @@ impl Error {
     }
 
     pub fn unsupported<N: Display>(name: N, pos: Pos) -> Error {
-        let err = format!("{} is unsupported here", name);
+        let err = format!("{} is unsupported", name);
         Error::CompileError(err, pos)
     }
-}
 
-impl From<io::Error> for Error {
-    fn from(err: io::Error) -> Self {
-        Error::IoError(err)
-    }
-}
-
-impl From<fmt::Error> for Error {
-    fn from(err: fmt::Error) -> Self {
-        Error::FormatError(err)
+    pub fn class_redefinition(pos: Pos) -> Error {
+        let err = "Class with this name is already defined elsewhere".to_owned();
+        Error::CompileError(err, pos)
     }
 }
 
@@ -153,8 +174,8 @@ impl FunctionResolutionError {
         FunctionResolutionError(message)
     }
 
-    pub fn too_many_args(expected: usize) -> FunctionResolutionError {
-        let error = format!("Too many arguments, expected {}", expected);
+    pub fn too_many_args(expected: usize, got: usize) -> FunctionResolutionError {
+        let error = format!("Too many arguments, expected {} but got {}", expected, got);
         FunctionResolutionError(error)
     }
 

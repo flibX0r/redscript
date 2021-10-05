@@ -121,9 +121,10 @@ impl<'a> Decompiler<'a> {
         Ok(result)
     }
 
-    fn consume_switch(&mut self) -> Result<Expr<SourceAst>, Error> {
+    fn consume_switch(&mut self, start: Location) -> Result<Expr<SourceAst>, Error> {
         let subject = self.consume()?;
 
+        self.code.set_pos(start)?;
         let mut labels = Vec::new();
         while let Some(Instr::SwitchLabel(exit_offset, start_offset)) = self.code.peek() {
             let position = self.code.pos();
@@ -182,7 +183,10 @@ impl<'a> Decompiler<'a> {
             Instr::U64Const(val) => Expr::Constant(Constant::U64(val), Pos::ZERO),
             Instr::F32Const(val) => Expr::Constant(Constant::F32(val), Pos::ZERO),
             Instr::F64Const(val) => Expr::Constant(Constant::F64(val), Pos::ZERO),
-            Instr::StringConst(str) => Expr::Constant(Constant::String(Literal::String, Rc::new(str)), Pos::ZERO),
+            Instr::StringConst(idx) => {
+                let str = self.pool.strings.get(idx)?.to_string();
+                Expr::Constant(Constant::String(Literal::String, Rc::new(str)), Pos::ZERO)
+            }
             Instr::NameConst(idx) => {
                 let str = self.pool.names.get(idx)?.to_string();
                 Expr::Constant(Constant::String(Literal::Name, Rc::new(str)), Pos::ZERO)
@@ -227,7 +231,7 @@ impl<'a> Decompiler<'a> {
                 }
             }
             Instr::ExternalVar => return Err(Error::DecompileError("Unexpected ExternalVar".to_owned())),
-            Instr::Switch(_, _) => self.consume_switch()?,
+            Instr::Switch(_, start) => self.consume_switch(start.absolute(position))?,
             Instr::SwitchLabel(_, _) => return Err(Error::DecompileError("Unexpected SwitchLabel".to_owned())),
             Instr::SwitchDefault => return Err(Error::DecompileError("Unexpected SwitchDefault".to_owned())),
             Instr::Jump(Offset { value: 3 }) => Expr::EMPTY,
@@ -251,7 +255,7 @@ impl<'a> Decompiler<'a> {
                     Pos::ZERO,
                 )
             }
-            Instr::InvokeStatic(_, _, idx) => {
+            Instr::InvokeStatic(_, _, idx, _) => {
                 let def = self.pool.definition(idx)?;
                 let name = Ident::Owned(self.pool.names.get(def.name)?);
                 let params = self.consume_params()?;
@@ -277,7 +281,7 @@ impl<'a> Decompiler<'a> {
                 // assert_eq!(fun.parameters.len(), params.len(), "Invalid number of parameters {:?}", params);
                 // }
             }
-            Instr::InvokeVirtual(_, _, idx) => {
+            Instr::InvokeVirtual(_, _, idx, _) => {
                 let name = Ident::Owned(self.pool.names.get(idx)?);
                 let params = self.consume_params()?;
                 if let Some(ctx) = context {
@@ -287,7 +291,14 @@ impl<'a> Decompiler<'a> {
                 }
             }
             Instr::ParamEnd => return Err(Error::DecompileError("Unexpected ParamEnd".to_owned())),
-            Instr::Return => Expr::Return(self.consume().ok().map(Box::new), Pos::ZERO),
+            Instr::Return => {
+                if let Some(Instr::Nop) = self.code.peek() {
+                    self.code.pop()?;
+                    Expr::Return(None, Pos::ZERO)
+                } else {
+                    Expr::Return(Some(Box::new(self.consume()?)), Pos::ZERO)
+                }
+            }
             Instr::StructField(idx) => {
                 let target = self.consume()?;
                 let field = self.definition_ident(idx)?;

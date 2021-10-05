@@ -8,7 +8,7 @@ use redscript::definition::Visibility;
 use strum::EnumString;
 
 use crate::source_map::File;
-use crate::{Import, ModulePath};
+use crate::symbol::{Import, ModulePath};
 
 #[derive(Debug)]
 pub struct SourceModule {
@@ -87,6 +87,7 @@ pub enum Qualifier {
     Callback,
     Out,
     Optional,
+    Quest,
 }
 
 #[derive(Debug)]
@@ -126,6 +127,7 @@ pub struct Annotation {
 #[strum(serialize_all = "camelCase")]
 pub enum AnnotationName {
     ReplaceMethod,
+    WrapMethod,
     ReplaceGlobal,
     AddMethod,
     AddField,
@@ -170,6 +172,7 @@ peg::parser! {
             / keyword("cb") { Qualifier::Callback }
             / keyword("out") { Qualifier::Out }
             / keyword("opt") { Qualifier::Optional }
+            / keyword("quest") { Qualifier::Quest }
 
         rule literal_type() -> Literal
             = "n" { Literal::Name }
@@ -253,7 +256,7 @@ peg::parser! {
             { FunctionSource { declaration, type_, parameters, body } }
         rule function_body() -> Seq<SourceAst>
             = "{" _ body:seq() _ "}" { body }
-            / pos:pos() "=" _ expr:expr() { Seq::new(vec![Expr::Return(Some(Box::new(expr)), pos)]) }
+            / pos:pos() "=" _ expr:expr() _ ";"? { Seq::new(vec![Expr::Return(Some(Box::new(expr)), pos)]) }
 
         rule param() -> ParameterSource
             = qualifiers:qualifiers() _ name:ident() _ type_:let_type()

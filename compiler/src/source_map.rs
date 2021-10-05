@@ -8,7 +8,7 @@ use redscript::ast::Pos;
 use redscript::error::Error;
 use walkdir::WalkDir;
 
-#[derive(Debug)]
+#[derive(Debug, Default)]
 pub struct Files {
     files: Vec<File>,
 }
@@ -90,12 +90,6 @@ impl fmt::Display for Files {
     }
 }
 
-impl Default for Files {
-    fn default() -> Self {
-        Files { files: vec![] }
-    }
-}
-
 #[derive(Debug)]
 pub struct File {
     path: PathBuf,
@@ -153,6 +147,10 @@ impl File {
         let start = span.low.0 - self.byte_offset().0;
         let end = span.high.0 - self.byte_offset().0;
         &self.source[start as usize..end as usize]
+    }
+
+    pub fn path(&self) -> &Path {
+        &self.path
     }
 }
 

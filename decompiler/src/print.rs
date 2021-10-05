@@ -68,7 +68,7 @@ pub fn write_definition<W: Write>(
             for method_index in &class.functions {
                 let method = pool.definition(*method_index)?;
                 if let Err(err) = write_definition(out, method, pool, depth + 1, mode) {
-                    log::error!("Method decompilation {:?} failed due to: {:?}", method_index, err)
+                    log::error!("Method decompilation {} failed (caused by {})", method_index, err)
                 }
             }
             writeln!(out, "}}")?
@@ -137,6 +137,9 @@ pub fn write_definition<W: Write>(
             if fun.flags.is_const() {
                 write!(out, "const ")?;
             }
+            if fun.flags.is_quest() {
+                write!(out, "quest ")?;
+            }
             if fun.flags.is_callback() {
                 write!(out, "cb ")?;
             }
@@ -144,6 +147,8 @@ pub fn write_definition<W: Write>(
 
             if fun.flags.has_body() {
                 write_function_body(out, fun, pool, depth, mode)?;
+            } else {
+                write!(out, ";")?;
             }
             writeln!(out)?;
         }
@@ -432,7 +437,7 @@ fn write_call<W: Write>(
         }
     } else if let Ok(unop) = UnOp::from_str(fun_name) {
         write_unop(out, &params[0], unop, verbose)
-    } else if (fun_name == "WeakRefToRef" || fun_name == "RefToWeakRef") && !verbose {
+    } else if (fun_name == "WeakRefToRef" || fun_name == "RefToWeakRef" || fun_name == "AsRef") && !verbose {
         write_expr(out, &params[0], verbose, 0)
     } else {
         write!(out, "{}(", fun_name)?;
@@ -471,7 +476,8 @@ fn format_param(def: &Definition, pool: &ConstantPool) -> Result<String, Error> 
         let name = pool.names.get(def.name)?;
         let out = if param.flags.is_out() { "out " } else { "" };
         let optional = if param.flags.is_optional() { "opt " } else { "" };
-        Ok(format!("{}{}{}: {}", out, optional, name, type_name))
+        let const_ = if param.flags.is_const() { "const " } else { "" };
+        Ok(format!("{}{}{}{}: {}", const_, out, optional, name, type_name))
     } else {
         Err(Error::DecompileError("Invalid type definition received".to_owned()))
     }

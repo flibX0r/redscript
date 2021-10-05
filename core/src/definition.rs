@@ -9,7 +9,7 @@ use crate::bytecode::{Code, Offset};
 use crate::decode::{Decode, DecodeExt};
 use crate::encode::{Encode, EncodeExt};
 
-#[derive(Debug)]
+#[derive(Debug, Clone)]
 pub struct Definition {
     pub name: PoolIndex<String>,
     pub parent: PoolIndex<Definition>,
@@ -79,57 +79,51 @@ impl Definition {
         }
     }
 
-    fn default(
-        name: PoolIndex<String>,
-        parent: PoolIndex<Definition>,
-        value: AnyDefinition,
-        unk2: u8,
-        unk3: u8,
-    ) -> Definition {
+    fn default(name: PoolIndex<String>, parent: PoolIndex<Definition>, value: AnyDefinition) -> Definition {
         Definition {
             name,
             parent,
             unk1: 0,
-            unk2,
-            unk3,
+            unk2: 0,
+            unk3: 0,
             value,
         }
     }
 
     pub fn local(name: PoolIndex<String>, parent: PoolIndex<Function>, local: Local) -> Definition {
-        Definition::default(name, parent.cast(), AnyDefinition::Local(local), 7, 60)
+        Definition::default(name, parent.cast(), AnyDefinition::Local(local))
     }
 
     pub fn param(name: PoolIndex<String>, parent: PoolIndex<Function>, param: Parameter) -> Definition {
-        Definition::default(name, parent.cast(), AnyDefinition::Parameter(param), 7, 60)
+        Definition::default(name, parent.cast(), AnyDefinition::Parameter(param))
     }
 
     pub fn class(name: PoolIndex<String>, class: Class) -> Definition {
-        Definition::default(name, PoolIndex::UNDEFINED, AnyDefinition::Class(class), 12, 60)
+        Definition::default(name, PoolIndex::UNDEFINED, AnyDefinition::Class(class))
     }
 
     pub fn type_(name: PoolIndex<String>, type_: Type) -> Definition {
-        Definition::default(name, PoolIndex::UNDEFINED, AnyDefinition::Type(type_), 12, 60)
+        Definition::default(name, PoolIndex::UNDEFINED, AnyDefinition::Type(type_))
     }
 
     pub fn function(name: PoolIndex<String>, parent: PoolIndex<Class>, fun: Function) -> Definition {
-        Definition::default(name, parent.cast(), AnyDefinition::Function(fun), 12, 60)
+        Definition::default(name, parent.cast(), AnyDefinition::Function(fun))
     }
 
     pub fn field(name: PoolIndex<String>, parent: PoolIndex<Class>, field: Field) -> Definition {
-        Definition::default(name, parent.cast(), AnyDefinition::Field(field), 12, 60)
+        Definition::default(name, parent.cast(), AnyDefinition::Field(field))
     }
 
     pub fn enum_(name: PoolIndex<String>, enum_: Enum) -> Definition {
-        Definition::default(name, PoolIndex::UNDEFINED, AnyDefinition::Enum(enum_), 82, 224)
+        Definition::default(name, PoolIndex::UNDEFINED, AnyDefinition::Enum(enum_))
     }
 
     pub fn enum_value(name: PoolIndex<String>, parent: PoolIndex<Enum>, value: i64) -> Definition {
-        Definition::default(name, parent.cast(), AnyDefinition::EnumValue(value), 82, 219)
+        Definition::default(name, parent.cast(), AnyDefinition::EnumValue(value))
     }
 }
 
-#[derive(Debug)]
+#[derive(Debug, Clone)]
 pub enum AnyDefinition {
     Type(Type),
     Class(Class),
@@ -174,7 +168,7 @@ impl Encode for AnyDefinition {
     }
 }
 
-#[derive(Debug)]
+#[derive(Debug, Clone)]
 pub struct Class {
     pub visibility: Visibility,
     pub flags: ClassFlags,
@@ -242,7 +236,7 @@ impl Encode for Class {
     }
 }
 
-#[derive(Debug)]
+#[derive(Debug, Clone)]
 pub struct Enum {
     pub flags: u8,
     pub size: u8,
@@ -276,7 +270,7 @@ impl Encode for Enum {
     }
 }
 
-#[derive(Debug)]
+#[derive(Debug, Clone)]
 pub struct Function {
     pub visibility: Visibility,
     pub flags: FunctionFlags,
@@ -360,8 +354,10 @@ impl Encode for Function {
 
         output.encode(&value.visibility)?;
         output.encode(&flags)?;
-        if let Some(ref source) = value.source {
-            output.encode(source)?;
+        if !flags.is_native() {
+            if let Some(ref source) = value.source {
+                output.encode(source)?;
+            }
         }
         if let Some(ref type_) = value.return_type {
             output.encode(type_)?;
@@ -389,7 +385,7 @@ impl Encode for Function {
     }
 }
 
-#[derive(Debug)]
+#[derive(Debug, Clone)]
 pub struct Field {
     pub visibility: Visibility,
     pub type_: PoolIndex<Type>,
@@ -523,7 +519,7 @@ impl Encode for Local {
     }
 }
 
-#[derive(Debug)]
+#[derive(Debug, Clone)]
 pub struct Parameter {
     pub type_: PoolIndex<Type>,
     pub flags: ParameterFlags,
@@ -544,7 +540,7 @@ impl Encode for Parameter {
     }
 }
 
-#[derive(Debug)]
+#[derive(Debug, Clone)]
 pub struct SourceFile {
     pub id: u32,
     pub path_hash: u64,
@@ -582,7 +578,7 @@ pub struct FieldFlags {
     pub is_inst_edit: bool,
     pub has_default: bool,
     pub is_persistent: bool,
-    pub bit9: bool,
+    pub is_test_only: bool,
     pub is_mutable: bool,
     #[skip]
     pub remainder: B5,
@@ -626,7 +622,7 @@ pub struct ParameterFlags {
     pub is_optional: bool,
     pub is_out: bool,
     pub is_short_circuit: bool,
-    pub bit3: bool,
+    pub is_const: bool,
     #[skip]
     pub remainder: B4,
 }
@@ -652,8 +648,8 @@ pub struct ClassFlags {
     pub is_struct: bool,
     pub has_functions: bool,
     pub has_fields: bool,
-    pub bit6: bool,
-    pub bit7: bool,
+    pub is_native_only: bool,
+    pub is_test_only: bool,
     pub has_overrides: bool,
     #[skip]
     pub remainder: B7,
@@ -687,13 +683,13 @@ pub struct FunctionFlags {
     pub has_locals: bool,
     pub has_body: bool,
     pub is_cast: bool,
-    pub is_safe: bool,
+    pub is_safe_cast: bool,
     #[skip]
     pub padding: B4,
     pub is_const: bool,
-    pub bit19: bool,
-    pub bit20: bool,
-    pub bit21: bool,
+    pub is_thread_safe: bool,
+    pub is_quest: bool,
+    pub is_test_only: bool,
     #[skip]
     pub remainder: B10,
 }
@@ -742,7 +738,7 @@ impl Encode for Visibility {
     }
 }
 
-#[derive(Debug)]
+#[derive(Debug, Clone)]
 pub struct SourceReference {
     pub file: PoolIndex<Definition>,
     pub line: u32,
@@ -764,7 +760,7 @@ impl Encode for SourceReference {
     }
 }
 
-#[derive(Debug)]
+#[derive(Debug, Clone)]
 pub struct Property {
     pub name: String,
     pub value: String,

@@ -7,8 +7,8 @@ use redscript::bytecode::IntrinsicOp;
 use redscript::definition::{Definition, Enum, Field, Function, Local, LocalFlags};
 use redscript::error::{Error, FunctionResolutionError};
 
-use crate::scope::{FunctionCandidates, FunctionMatch, Scope};
-use crate::{Reference, Symbol, TypeId, Value};
+use crate::scope::{FunctionCandidates, FunctionMatch, Reference, Scope, TypeId, Value};
+use crate::symbol::Symbol;
 
 pub struct TypeChecker<'a> {
     pool: &'a mut ConstantPool,
@@ -118,17 +118,16 @@ impl<'a> TypeChecker<'a> {
                 let candidates = scope.resolve_method(name.clone(), class, self.pool, *pos)?;
                 let match_ = self.resolve_overload(name.clone(), candidates, args.iter(), expected, scope, *pos)?;
 
-                if let TypeId::WeakRef(inner) = type_ {
-                    let converted =
-                        insert_conversion(checked_context, &TypeId::Ref(inner), Conversion::WeakRefToRef, *pos);
-                    Expr::MethodCall(Box::new(converted), match_.index, match_.args, *pos)
+                let converted_context = if let TypeId::WeakRef(inner) = type_ {
+                    insert_conversion(checked_context, &TypeId::Ref(inner), Conversion::WeakRefToRef, *pos)
                 } else {
-                    Expr::MethodCall(Box::new(checked_context), match_.index, match_.args, *pos)
-                }
+                    checked_context
+                };
+                Expr::MethodCall(Box::new(converted_context), match_.index, match_.args, *pos)
             }
             Expr::BinOp(lhs, rhs, op, pos) => {
                 let name = Ident::Static(op.into());
-                let args = iter::once(lhs.as_ref()).chain(iter::once(rhs.as_ref()));
+                let args = IntoIterator::into_iter([lhs.as_ref(), rhs.as_ref()]);
                 let candidates = scope.resolve_function(name.clone(), *pos)?;
                 let match_ = self.resolve_overload(name, candidates, args, expected, scope, *pos)?;
                 Expr::Call(Callable::Function(match_.index), match_.args, *pos)
@@ -142,7 +141,9 @@ impl<'a> TypeChecker<'a> {
             }
             Expr::Member(context, name, pos) => {
                 let checked_context = self.check(context, None, scope)?;
-                let member = match type_of(&checked_context, scope, self.pool)?.unwrapped() {
+                let type_ = type_of(&checked_context, scope, self.pool)?;
+
+                let member = match type_.unwrapped() {
                     TypeId::Class(class) => {
                         let field = scope.resolve_field(name.clone(), *class, self.pool, *pos)?;
                         Member::ClassField(field)
@@ -157,7 +158,12 @@ impl<'a> TypeChecker<'a> {
                     }
                     type_ => return Err(Error::invalid_context(type_.pretty(self.pool)?.as_ref(), *pos)),
                 };
-                Expr::Member(Box::new(checked_context), member, *pos)
+                let converted_context = if let TypeId::WeakRef(inner) = type_ {
+                    insert_conversion(checked_context, &TypeId::Ref(inner), Conversion::WeakRefToRef, *pos)
+                } else {
+                    checked_context
+                };
+                Expr::Member(Box::new(converted_context), member, *pos)
             }
             Expr::ArrayElem(expr, idx, pos) => {
                 let idx_type = scope.resolve_type(&TypeName::INT32, self.pool, *pos)?;
@@ -449,55 +455,66 @@ impl<'a> TypeChecker<'a> {
         &mut self,
         name: Ident,
         overloads: FunctionCandidates,
-        args: impl Iterator<Item = &'b Expr<SourceAst>> + Clone,
+        args: impl ExactSizeIterator<Item = &'b Expr<SourceAst>> + Clone,
         expected: Option<&TypeId>,
         scope: &mut Scope,
         pos: Pos,
     ) -> Result<FunctionMatch, Error> {
         let mut overload_errors = Vec::new();
+        let mut inner_error = None;
 
         for fun_idx in overloads.functions {
             match self.try_overload(fun_idx, args.clone(), expected, scope, pos) {
                 Ok(Ok(res)) => return Ok(res),
                 Ok(Err(err)) => overload_errors.push(err),
+                Err(err @ Error::ResolutionError(_, _)) => inner_error = Some(err),
                 Err(other) => return Err(other),
             }
         }
-        Err(Error::no_matching_overload(name, &overload_errors, pos))
+        if let Some(inner) = inner_error {
+            Err(inner)
+        } else {
+            Err(Error::no_matching_overload(name, &overload_errors, pos))
+        }
     }
 
     fn try_overload<'b>(
         &mut self,
         fun_idx: PoolIndex<Function>,
-        arg_iter: impl Iterator<Item = &'b Expr<SourceAst>>,
+        args: impl ExactSizeIterator<Item = &'b Expr<SourceAst>>,
         expected: Option<&TypeId>,
         scope: &mut Scope,
         pos: Pos,
     ) -> Result<Result<FunctionMatch, FunctionResolutionError>, Error> {
         let fun = self.pool.function(fun_idx)?;
         let params = fun.parameters.clone();
+        let ret_type = fun.return_type;
 
-        if let Some(expected) = expected {
-            let ret_type_idx = fun.return_type.ok_or_else(|| Error::void_cannot_be_used(pos))?;
-            let ret_type = scope.resolve_type_from_pool(ret_type_idx, self.pool, pos)?;
-            if find_conversion(&ret_type, expected, self.pool)?.is_none() {
-                let err =
-                    FunctionResolutionError::return_mismatch(expected.pretty(self.pool)?, ret_type.pretty(self.pool)?);
-                return Ok(Err(err));
+        if args.len() > params.len() {
+            return Ok(Err(FunctionResolutionError::too_many_args(params.len(), args.len())));
+        }
+
+        if fun.flags.is_cast() || fun.flags.is_operator_overload() {
+            if let Some(expected) = expected {
+                let ret_type_idx = ret_type.ok_or_else(|| Error::void_cannot_be_used(pos))?;
+                let ret_type = scope.resolve_type_from_pool(ret_type_idx, self.pool, pos)?;
+                if find_conversion(&ret_type, expected, self.pool)?.is_none() {
+                    let err = FunctionResolutionError::return_mismatch(
+                        expected.pretty(self.pool)?,
+                        ret_type.pretty(self.pool)?,
+                    );
+                    return Ok(Err(err));
+                }
             }
         }
 
-        let mut args = Vec::new();
-        for (idx, arg) in arg_iter.enumerate() {
-            let param_idx = match params.get(idx) {
-                Some(val) => *val,
-                None => return Ok(Err(FunctionResolutionError::too_many_args(params.len()))),
-            };
-            let param = self.pool.parameter(param_idx)?;
+        let mut compiled_args = Vec::new();
+        for (idx, arg) in args.enumerate() {
+            let param = self.pool.parameter(params[idx])?;
             let param_type = scope.resolve_type_from_pool(param.type_, self.pool, pos)?;
             match self.check_and_convert(arg, &param_type, scope, pos) {
-                Ok(converted) => args.push(converted),
-                Err(Error::CompileError(err, _)) => {
+                Ok(converted) => compiled_args.push(converted),
+                Err(Error::TypeError(err, _)) => {
                     return Ok(Err(FunctionResolutionError::parameter_mismatch(&err, idx)))
                 }
                 Err(err) => return Err(err),
@@ -511,10 +528,13 @@ impl<'a> TypeChecker<'a> {
             .count();
 
         let min_params = params.len() - opt_param_count;
-        if args.len() >= min_params {
-            Ok(Ok(FunctionMatch { index: fun_idx, args }))
+        if compiled_args.len() >= min_params {
+            Ok(Ok(FunctionMatch {
+                index: fun_idx,
+                args: compiled_args,
+            }))
         } else {
-            let err = FunctionResolutionError::invalid_arg_count(args.len(), min_params, params.len());
+            let err = FunctionResolutionError::invalid_arg_count(compiled_args.len(), min_params, params.len());
             Ok(Err(err))
         }
     }
@@ -523,7 +543,7 @@ impl<'a> TypeChecker<'a> {
         let name_idx = self.pool.names.add(name.to_owned());
         let local = Local::new(scope.get_type_index(type_, self.pool)?, LocalFlags::new());
         let local_def = Definition::local(name_idx, scope.function.unwrap().cast(), local);
-        let local_idx = self.pool.add_definition(local_def).cast();
+        let local_idx = self.pool.add_definition(local_def);
         scope.add_local(name, local_idx);
         self.locals.push(local_idx);
         Ok(local_idx)
@@ -661,6 +681,9 @@ fn find_conversion(from: &TypeId, to: &TypeId, pool: &ConstantPool) -> Result<Op
             {
                 Some(Conversion::RefToWeakRef)
             }
+            (from, TypeId::ScriptRef(to)) if find_conversion(from, to, pool)? == Some(Conversion::Identity) => {
+                Some(Conversion::ToScriptRef)
+            }
             _ => None,
         }
     };
@@ -680,6 +703,7 @@ fn insert_conversion(expr: Expr<TypedAst>, type_: &TypeId, conversion: Conversio
             vec![expr],
             pos,
         ),
+        Conversion::ToScriptRef => Expr::Call(Callable::Intrinsic(IntrinsicOp::AsRef, type_.clone()), vec![expr], pos),
     }
 }
 
@@ -713,4 +737,5 @@ pub enum Conversion {
     Identity,
     RefToWeakRef,
     WeakRefToRef,
+    ToScriptRef,
 }

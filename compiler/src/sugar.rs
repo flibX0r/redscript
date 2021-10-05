@@ -7,10 +7,10 @@ use redscript::bytecode::IntrinsicOp;
 use redscript::definition::{Definition, Local, LocalFlags};
 use redscript::error::Error;
 
-use crate::scope::Scope;
+use crate::scope::{Reference, Scope, TypeId, Value};
+use crate::symbol::{FunctionSignature, FunctionSignatureBuilder};
 use crate::transform::ExprTransformer;
 use crate::typechecker::{type_of, Callable, TypedAst};
-use crate::{FunctionSignature, FunctionSignatureBuilder, Reference, TypeId, Value};
 
 pub struct Desugar<'a> {
     pool: &'a mut ConstantPool,
@@ -55,7 +55,7 @@ impl<'a> Desugar<'a> {
         let type_idx = self.scope.get_type_index(type_, self.pool)?;
         let local = Local::new(type_idx, LocalFlags::new());
         let def = Definition::local(name_idx, fun_idx, local);
-        let idx = self.pool.add_definition(def).cast();
+        let idx = self.pool.add_definition(def);
         self.locals.push(idx);
         self.name_count += 1;
         Ok(Reference::Value(Value::Local(idx)))
