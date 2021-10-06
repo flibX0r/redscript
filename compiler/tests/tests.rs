@@ -514,7 +514,7 @@ fn compile_number_literals() -> Result<(), Error> {
             let g: Int64 = 7;
             let h: Int64 = 8l;
             let i: Uint32 = 9u;
-            let j: Uint64 = 10u;
+            let j: Uint64 = 0b1010;
         }
         ";
     let expected = vec![

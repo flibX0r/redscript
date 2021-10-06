@@ -1,5 +1,6 @@
 use std::rc::Rc;
 use std::str::FromStr;
+use std::convert::TryFrom;
 
 use peg::error::ParseError;
 use peg::str::LineCol;
@@ -197,14 +198,45 @@ peg::parser! {
         rule keyword(id: &'static str) -> () =
             ##parse_string_literal(id) !['0'..='9' | 'a'..='z' | 'A'..='Z' | '_']
 
-        rule number() -> Constant
-            = n:$(['0'..='9' | '.']+) postfix:$(['u' | 'l' | 'd'])?
-            {? if postfix == Some("d") { n.parse::<f64>().or(Err("valid double")).map(Constant::F64) }
-               else if n.contains('.') { n.parse::<f32>().or(Err("valid float")).map(Constant::F32) }
-               else if postfix == Some("l") { n.parse::<i64>().or(Err("valid 64-bit int")).map(Constant::I64) }
-               else if postfix == Some("u") { n.parse::<u32>().or(Err("valid 32-bit uint")).map(Constant::U32) }
-               else { n.parse::<i32>().or(Err("valid 32-bit int")).map(Constant::I32) }
+
+        rule digits_hex() -> u64
+            = h:$(['0'..='9' | 'a'..='f' | 'A'..='F' | '_']+) {? u64::from_str_radix(&h.replace("_", ""), 16).or(Err("valid UInt64")) }
+        rule digits_dec() -> u64
+            = d:$(['0'..='9' | '_']+) {? u64::from_str_radix(&d.replace("_", ""), 10).or(Err("valid UInt64")) }
+        rule digits_oct() -> u64
+            = o:$(['0'..='7' | '_']+) {? u64::from_str_radix(&o.replace("_", ""), 8).or(Err("valid UInt64")) }
+        rule digits_bin() -> u64
+            = b:$(['0'..='1' | '_']+) {? u64::from_str_radix(&b.replace("_", ""), 2).or(Err("valid UInt64")) }
+
+        rule number_unsigned() -> u64
+            = "0x" h:digits_hex() { h }
+            / "0o" o:digits_oct() { o }
+            / "0b" b:digits_bin() { b }
+            / d:digits_dec()      { d }
+
+        rule number_integer() -> Constant
+            = sign:$(['-'])? d:number_unsigned() suffix:$(['u'|'l']*)? {?
+                if sign == Some("-") {
+                    i32::try_from(d).map(|i| Constant::I32(-i))
+                    .or(i64::try_from(d).map(|i| Constant::I64(-i)))
+                    .or(Err("valid Int64"))
+                }
+                else {
+                    u32::try_from(d).map(Constant::U32)
+                    .or(u64::try_from(d).map(Constant::U64))
+                    .or(Err("valid Uint64"))
+                }
             }
+
+        rule number_floating() -> Constant
+            = d:$(['+'|'-']? ['0'..='9'|'_']+ "." ['0'..='9'|'_']*) suffix:$(['d'])? {?
+                if suffix == Some("d") { f64::from_str(&d.replace("_", "")).map(Constant::F64).or(Err("valid Double")) }
+                else { f32::from_str(&d.replace("_", "")).map(Constant::F32).or(Err("valid Float")) }
+            }
+
+        rule number() -> Constant
+            = f:number_floating() { f }
+            / i:number_integer()  { i }
 
         rule escaped_char() -> String
             = !['\\' | '\"'] c:$([_]) { String::from(c) }

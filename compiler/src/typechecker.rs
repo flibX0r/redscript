@@ -1,5 +1,6 @@
 use std::iter;
 use std::str::FromStr;
+use std::convert::TryFrom;
 
 use redscript::ast::{Constant, Expr, Ident, Literal, NameKind, Pos, Seq, SourceAst, SwitchCase, TypeName};
 use redscript::bundle::{ConstantPool, PoolIndex};
@@ -39,7 +40,11 @@ impl<'a> TypeChecker<'a> {
                             Constant::I32(i) if type_name == TypeName::FLOAT.pretty() => Constant::F32(*i as f32),
                             Constant::I32(i) if type_name == TypeName::DOUBLE.pretty() => Constant::F64(*i as f64),
                             Constant::I32(i) if type_name == TypeName::INT64.pretty() => Constant::I64((*i).into()),
+
+                            Constant::U32(u) if type_name == TypeName::INT32.pretty() => Constant::I32(*u as i32),
+
                             Constant::U32(i) if type_name == TypeName::UINT64.pretty() => Constant::U64((*i).into()),
+
                             Constant::F32(i) if type_name == TypeName::DOUBLE.pretty() => Constant::F64((*i).into()),
                             other => other.clone(),
                         }
