@@ -1,11 +1,11 @@
-use std::rc::Rc;
 use std::str::FromStr;
 use std::convert::TryFrom;
 
 use peg::error::ParseError;
 use peg::str::LineCol;
-use redscript::ast::{BinOp, Constant, Expr, Ident, Literal, Pos, Seq, SourceAst, SwitchCase, TypeName, UnOp};
+use redscript::ast::{BinOp, Constant, Expr, Ident, Literal, Pos, Seq, SourceAst, Span, SwitchCase, TypeName, UnOp};
 use redscript::definition::Visibility;
+use redscript::Ref;
 use strum::EnumString;
 
 use crate::source_map::File;
@@ -26,13 +26,23 @@ pub enum SourceEntry {
     Enum(EnumSource),
 }
 
+impl SourceEntry {
+    pub fn annotations(&self) -> &[Annotation] {
+        match self {
+            SourceEntry::Function(fun) => &fun.declaration.annotations,
+            SourceEntry::GlobalLet(field) => &field.declaration.annotations,
+            _ => &[],
+        }
+    }
+}
+
 #[derive(Debug)]
 pub struct ClassSource {
     pub qualifiers: Qualifiers,
     pub name: Ident,
     pub base: Option<Ident>,
     pub members: Vec<MemberSource>,
-    pub pos: Pos,
+    pub span: Span,
 }
 
 #[derive(Debug)]
@@ -53,6 +63,7 @@ pub struct FunctionSource {
     pub type_: Option<TypeName>,
     pub parameters: Vec<ParameterSource>,
     pub body: Option<Seq<SourceAst>>,
+    pub span: Span,
 }
 
 #[derive(Debug)]
@@ -66,6 +77,7 @@ pub struct ParameterSource {
 pub struct EnumSource {
     pub name: Ident,
     pub members: Vec<EnumMember>,
+    pub span: Span,
 }
 
 #[derive(Debug)]
@@ -89,6 +101,7 @@ pub enum Qualifier {
     Out,
     Optional,
     Quest,
+    ImportOnly,
 }
 
 #[derive(Debug)]
@@ -114,24 +127,25 @@ pub struct Declaration {
     pub annotations: Vec<Annotation>,
     pub qualifiers: Qualifiers,
     pub name: Ident,
-    pub pos: Pos,
+    pub span: Span,
 }
 
 #[derive(Debug)]
 pub struct Annotation {
-    pub name: AnnotationName,
-    pub values: Vec<Ident>,
-    pub pos: Pos,
+    pub kind: AnnotationKind,
+    pub args: Vec<Expr<SourceAst>>,
+    pub span: Span,
 }
 
 #[derive(Debug, PartialEq, Eq, EnumString)]
 #[strum(serialize_all = "camelCase")]
-pub enum AnnotationName {
+pub enum AnnotationKind {
     ReplaceMethod,
     WrapMethod,
     ReplaceGlobal,
     AddMethod,
     AddField,
+    If,
 }
 
 pub fn parse_file(file: &File) -> Result<SourceModule, ParseError<LineCol>> {
@@ -174,6 +188,7 @@ peg::parser! {
             / keyword("out") { Qualifier::Out }
             / keyword("opt") { Qualifier::Optional }
             / keyword("quest") { Qualifier::Quest }
+            / keyword("importonly") { Qualifier::ImportOnly }
 
         rule literal_type() -> Literal
             = "n" { Literal::Name }
@@ -181,9 +196,9 @@ peg::parser! {
             / "t" { Literal::TweakDbId }
 
         rule annotation() -> Annotation
-            = pos:pos() "@" ident:ident() _ "(" _ values:commasep(<ident()>) _ ")" {?
-                AnnotationName::from_str(ident.as_ref()).map(|name| {
-                    Annotation { name, values, pos }
+            = pos:pos() "@" ident:ident() _ "(" _ args:commasep(<expr()>) _ ")" end:pos() {?
+                AnnotationKind::from_str(ident.as_ref()).map(|kind| {
+                    Annotation { kind, args, span: Span::new(pos, end) }
                 }).map_err(|_| "annotation")
             }
 
@@ -250,15 +265,27 @@ peg::parser! {
                 String::from(char::from_u32(u32::from_str_radix(u, 16).unwrap()).unwrap())
             }
 
+        rule string_contents() -> String
+            = s:escaped_char()* { s.join("") }
+
         pub rule escaped_string() -> String
-            = "\"" s:escaped_char()* "\"" { s.join("") }
+            = "\"" s:string_contents() "\"" { s }
+
+        rule interpolation() -> Expr<SourceAst>
+            = r#"\("# _ expr:expr() _ ")" { expr }
+
+        rule string_part() -> (Expr<SourceAst>, Ref<String>)
+            = e:interpolation() s:string_contents() { (e, Ref::new(s)) }
+
+        pub rule interpolated_string() -> (Ref<String>, Vec<(Expr<SourceAst>, Ref<String>)>)
+            = "s\""  prefix:string_contents() parts:string_part()* "\"" { (Ref::new(prefix), parts) }
 
         rule constant() -> Constant
             = keyword("true") { Constant::Bool(true) }
             / keyword("false") { Constant::Bool(false) }
             / n:number() { n }
             / type_:literal_type()? str:escaped_string()
-                { Constant::String(type_.unwrap_or(Literal::String), Rc::new(str)) }
+                { Constant::String(type_.unwrap_or(Literal::String), Ref::new(str)) }
 
         rule seq() -> Seq<SourceAst> = exprs:(stmt() ** _) { Seq::new(exprs) }
 
@@ -272,23 +299,23 @@ peg::parser! {
         rule initializer() -> Expr<SourceAst> = "=" _ val:expr() { val }
 
         rule let() -> Expr<SourceAst>
-            = pos:pos() keyword("let") _ name:ident() _ type_:let_type()? _ val:initializer()? _ ";"
-            { Expr::Declare(name, type_, val.map(Box::new), pos) }
+            = pos:pos() keyword("let") _ name:ident() _ type_:let_type()? _ val:initializer()? _ ";" end:pos()
+            { Expr::Declare(name, type_, val.map(Box::new), Span::new(pos, end)) }
 
         rule decl(inner: rule<()>) -> Declaration
-            = pos:pos() annotations:(annotation() ** _) _ qualifiers:qualifiers() _ inner() _ name:ident()
-            { Declaration { annotations, qualifiers, name, pos } }
+            = pos:pos() annotations:(annotation() ** _) _ qualifiers:qualifiers() _ inner() _ name:ident() end:pos()
+            { Declaration { annotations, qualifiers, name, span: Span::new(pos, end) } }
 
         rule field() -> FieldSource
             = declaration:decl(<keyword("let")>) _ type_:let_type() _ ";"
             { FieldSource { declaration, type_ }}
 
         pub rule function() -> FunctionSource
-            = declaration:decl(<keyword("func")>) _ "(" _ parameters:commasep(<param()>) _ ")" _ type_:func_type()? _ body:function_body()?
-            { FunctionSource { declaration, type_, parameters, body } }
+            = pos:pos() declaration:decl(<keyword("func")>) _ "(" _ parameters:commasep(<param()>) _ ")" _ type_:func_type()? _ body:function_body()? ";"? end:pos()
+            { FunctionSource { declaration, type_, parameters, body, span: Span::new(pos, end) } }
         rule function_body() -> Seq<SourceAst>
             = "{" _ body:seq() _ "}" { body }
-            / pos:pos() "=" _ expr:expr() _ ";"? { Seq::new(vec![Expr::Return(Some(Box::new(expr)), pos)]) }
+            / pos:pos() "=" _ expr:expr() _ end:pos() { Seq::new(vec![Expr::Return(Some(Box::new(expr)), Span::new(pos, end))]) }
 
         rule param() -> ParameterSource
             = qualifiers:qualifiers() _ name:ident() _ type_:let_type()
@@ -297,16 +324,16 @@ peg::parser! {
         rule extends() -> Ident = keyword("extends") _ name:ident() { name }
 
         pub rule class() -> ClassSource
-            = pos:pos() qualifiers:qualifiers() _ keyword("class") _ name:ident() _ base:extends()? _ "{" _ members:member()**_ _ "}"
-            { ClassSource { qualifiers, name, base, members, pos } }
+            = pos:pos() qualifiers:qualifiers() _ keyword("class") _ name:ident() _ base:extends()? _ "{" _ members:member()**_ _ "}" end:pos()
+            { ClassSource { qualifiers, name, base, members, span: Span::new(pos, end) } }
 
         rule member() -> MemberSource
             = fun:function() { MemberSource::Function(fun) }
             / field:field() { MemberSource::Field(field) }
 
         pub rule enum_() -> EnumSource
-            = keyword("enum") _ name:ident() _ "{" _ members:commasep(<enum_member()>) _ ","? _ "}"
-            { EnumSource { name, members } }
+            = pos:pos() keyword("enum") _ name:ident() _ "{" _ members:commasep(<enum_member()>) _ ","? _ "}" end:pos()
+            { EnumSource { name, members, span: Span::new(pos, end) } }
 
         rule enum_member() -> EnumMember
             = name:ident() _ "=" _ value:number()
@@ -324,12 +351,12 @@ peg::parser! {
             / enum_:enum_() { SourceEntry::Enum(enum_) }
 
         rule import() -> Import
-            = pos:pos() keyword("import") _ parts: dotsep(<ident()>) _ "." _ "*"
-                { Import::All(ModulePath::new(parts), pos) }
-            / pos:pos() keyword("import") _ parts: dotsep(<ident()>) _ "." _ "{" _ names:commasep(<ident()>) _ "}"
-                { Import::Selected(ModulePath::new(parts), names, pos) }
-            / pos:pos() keyword("import") _ parts: dotsep(<ident()>)
-                { Import::Exact(ModulePath::new(parts), pos) }
+            = pos:pos() annotations:(annotation() ** _) _ keyword("import") _ parts: dotsep(<ident()>) _ "." _ "*" end:pos()
+                { Import::All(annotations, ModulePath::new(parts), Span::new(pos, end)) }
+            / pos:pos() annotations:(annotation() ** _) _ keyword("import") _ parts: dotsep(<ident()>) _ "." _ "{" _ names:commasep(<ident()>) _ "}" end:pos()
+                { Import::Selected(annotations, ModulePath::new(parts), names, Span::new(pos, end)) }
+            / pos:pos() annotations:(annotation() ** _) _ keyword("import") _ parts: dotsep(<ident()>) end:pos()
+                { Import::Exact(annotations, ModulePath::new(parts), Span::new(pos, end)) }
 
         rule module_path() -> ModulePath  =
             keyword("module") _ parts:dotsep(<ident()>) { ModulePath { parts } }
@@ -339,8 +366,8 @@ peg::parser! {
             { SourceModule { path, imports, entries } }
 
         rule switch() -> Expr<SourceAst>
-            = keyword("switch") _ matcher:expr() _ "{" _ cases:(case() ** _) _ default:default()? _ "}" _ ";"?
-            { Expr::Switch(Box::new(matcher), cases, default) }
+            = pos:pos() keyword("switch") _ matcher:expr() _ "{" _ cases:(case() ** _) _ default:default()? _ "}" _ ";"? end:pos()
+            { Expr::Switch(Box::new(matcher), cases, default, Span::new(pos, end)) }
 
         rule case() -> SwitchCase<SourceAst>
             = keyword("case") _ matcher:expr() _ ":" _ body:seq()
@@ -350,16 +377,16 @@ peg::parser! {
             = keyword("default") _ ":" _ body:seq() { body }
 
         rule while_() -> Expr<SourceAst>
-            = pos:pos() keyword("while") _ cond:expr() _ "{" _ body:seq() _ "}" _ ";"?
-            { Expr::While(Box::new(cond), body, pos) }
+            = pos:pos() keyword("while") _ cond:expr() _ "{" _ body:seq() _ "}" _ ";"? end:pos()
+            { Expr::While(Box::new(cond), body, Span::new(pos, end)) }
 
         rule for_() -> Expr<SourceAst>
-            = pos:pos() keyword("for") _ ident:ident() _ keyword("in") _ array:expr() _ "{" _ body:seq() _ "}" _ ";"?
-            { Expr::ForIn(ident, Box::new(array), body, pos) }
+            = pos:pos() keyword("for") _ ident:ident() _ keyword("in") _ array:expr() _ "{" _ body:seq() _ "}" _ ";"? end:pos()
+            { Expr::ForIn(ident, Box::new(array), body, Span::new(pos, end)) }
 
         rule if_() -> Expr<SourceAst>
-            = pos:pos() keyword("if") _ cond:expr() _ "{" _ if_:seq() _ "}" _ else_:else_()? _ ";"?
-            { Expr::If(Box::new(cond), if_, else_, pos) }
+            = pos:pos() keyword("if") _ cond:expr() _ "{" _ if_:seq() _ "}" _ else_:else_()? _ ";"? end:pos()
+            { Expr::If(Box::new(cond), if_, else_, Span::new(pos, end)) }
         rule else_() -> Seq<SourceAst>
             = keyword("else") _ "{" _ body:seq() _ "}" { body }
 
@@ -368,69 +395,110 @@ peg::parser! {
             / for_: for_() { for_ }
             / if_: if_() { if_ }
             / switch: switch() { switch }
-            / pos:pos() keyword("return") _ val:expr()? _ ";" { Expr::Return(val.map(Box::new), pos) }
-            / pos:pos() keyword("break") _ ";" { Expr::Break(pos) }
+            / pos:pos() keyword("return") _ val:expr()? _ ";" end:pos() { Expr::Return(val.map(Box::new), Span::new(pos, end)) }
+            / pos:pos() keyword("break") _ ";" end:pos() { Expr::Break(Span::new(pos, end)) }
             / let_:let() { let_ }
             / expr:expr() _ ";" { expr }
 
         pub rule expr() -> Expr<SourceAst> = precedence!{
-            x:@ _ pos:pos() "?" _ y:expr() _ ":" _ z:expr()
-                { Expr::Conditional(Box::new(x), Box::new(y), Box::new(z), pos) }
-            x:@ _ pos:pos() "=" _ y:(@) { Expr::Assign(Box::new(x), Box::new(y), pos) }
-            x:@ _ pos:pos() "+=" _ y:(@) { Expr::BinOp(Box::new(x), Box::new(y), BinOp::AssignAdd, pos) }
-            x:@ _ pos:pos() "-=" _ y:(@) { Expr::BinOp(Box::new(x), Box::new(y), BinOp::AssignSubtract, pos) }
-            x:@ _ pos:pos() "*=" _ y:(@) { Expr::BinOp(Box::new(x), Box::new(y), BinOp::AssignMultiply, pos) }
-            x:@ _ pos:pos() "/=" _ y:(@) { Expr::BinOp(Box::new(x), Box::new(y), BinOp::AssignDivide, pos) }
-            x:@ _ pos:pos() "|=" _ y:(@) { Expr::BinOp(Box::new(x), Box::new(y), BinOp::AssignOr, pos) }
-            x:@ _ pos:pos() "&=" _ y:(@) { Expr::BinOp(Box::new(x), Box::new(y), BinOp::AssignAnd, pos) }
+            x:@ _ "?" _ y:expr() _ ":" _ z:expr() {
+                let span = x.span().merge(z.span());
+                Expr::Conditional(Box::new(x), Box::new(y), Box::new(z), span)
+            }
+            x:@ _ "=" _ y:(@) {
+                let span = x.span().merge(y.span());
+                Expr::Assign(Box::new(x), Box::new(y), span)
+            }
+            x:@ _ pos:pos() "+=" end:pos() _ y:(@) { binop(x, y, BinOp::AssignAdd) }
+            x:@ _ pos:pos() "-=" end:pos() _ y:(@) { binop(x, y, BinOp::AssignSubtract) }
+            x:@ _ pos:pos() "*=" end:pos() _ y:(@) { binop(x, y, BinOp::AssignMultiply) }
+            x:@ _ pos:pos() "/=" end:pos() _ y:(@) { binop(x, y, BinOp::AssignDivide) }
+            x:@ _ pos:pos() "|=" end:pos() _ y:(@) { binop(x, y, BinOp::AssignOr) }
+            x:@ _ pos:pos() "&=" end:pos() _ y:(@) { binop(x, y, BinOp::AssignAnd) }
             --
-            x:(@) _ pos:pos() "||" _ y:@ { Expr::BinOp(Box::new(x), Box::new(y), BinOp::LogicOr, pos) }
-            x:(@) _ pos:pos() "&&" _ y:@ { Expr::BinOp(Box::new(x), Box::new(y), BinOp::LogicAnd, pos) }
-            x:(@) _ pos:pos() "|" _ y:@ { Expr::BinOp(Box::new(x), Box::new(y), BinOp::Or, pos) }
-            x:(@) _ pos:pos() "^" _ y:@ { Expr::BinOp(Box::new(x), Box::new(y), BinOp::Xor, pos) }
-            x:(@) _ pos:pos() "&" _ y:@ { Expr::BinOp(Box::new(x), Box::new(y), BinOp::And, pos) }
+            x:(@) _ pos:pos() "||" end:pos() _ y:@ { binop(x, y, BinOp::LogicOr) }
+            x:(@) _ pos:pos() "&&" end:pos() _ y:@ { binop(x, y, BinOp::LogicAnd) }
+            x:(@) _ pos:pos() "|" end:pos() _ y:@ { binop(x, y, BinOp::Or) }
+            x:(@) _ pos:pos() "^" end:pos() _ y:@ { binop(x, y, BinOp::Xor) }
+            x:(@) _ pos:pos() "&" end:pos() _ y:@ { binop(x, y, BinOp::And) }
             --
-            x:(@) _ pos:pos() "==" _ y:@ { Expr::BinOp(Box::new(x), Box::new(y), BinOp::Equal, pos) }
-            x:(@) _ pos:pos() "!=" _ y:@ { Expr::BinOp(Box::new(x), Box::new(y), BinOp::NotEqual, pos) }
+            x:(@) _ pos:pos() "==" end:pos() _ y:@ { binop(x, y, BinOp::Equal) }
+            x:(@) _ pos:pos() "!=" end:pos() _ y:@ { binop(x, y, BinOp::NotEqual) }
             --
-            x:(@) _ pos:pos() "<" _ y:@ { Expr::BinOp(Box::new(x), Box::new(y), BinOp::Less, pos) }
-            x:(@) _ pos:pos() "<=" _ y:@ { Expr::BinOp(Box::new(x), Box::new(y), BinOp::LessEqual, pos) }
-            x:(@) _ pos:pos() ">" _ y:@ { Expr::BinOp(Box::new(x), Box::new(y), BinOp::Greater, pos) }
-            x:(@) _ pos:pos() ">=" _ y:@ { Expr::BinOp(Box::new(x), Box::new(y), BinOp::GreaterEqual, pos) }
+            x:(@) _ pos:pos() "<" end:pos() _ y:@ { binop(x, y, BinOp::Less) }
+            x:(@) _ pos:pos() "<=" end:pos() _ y:@ { binop(x, y, BinOp::LessEqual) }
+            x:(@) _ pos:pos() ">" end:pos() _ y:@ { binop(x, y, BinOp::Greater) }
+            x:(@) _ pos:pos() ">=" end:pos() _ y:@ { binop(x, y, BinOp::GreaterEqual) }
             --
-            x:(@) _ pos:pos() "+" _ y:@ { Expr::BinOp(Box::new(x), Box::new(y), BinOp::Add, pos) }
-            x:(@) _ pos:pos() "-" _ y:@ { Expr::BinOp(Box::new(x), Box::new(y), BinOp::Subtract, pos) }
+            x:(@) _ pos:pos() "+" end:pos() _ y:@ { binop(x, y, BinOp::Add) }
+            x:(@) _ pos:pos() "-" end:pos() _ y:@ { binop(x, y, BinOp::Subtract) }
             --
-            x:(@) _ pos:pos() "*" _ y:@ { Expr::BinOp(Box::new(x), Box::new(y), BinOp::Multiply, pos) }
-            x:(@) _ pos:pos() "/" _ y:@ { Expr::BinOp(Box::new(x), Box::new(y), BinOp::Divide, pos) }
-            x:(@) _ pos:pos() "%" _ y:@ { Expr::BinOp(Box::new(x), Box::new(y), BinOp::Modulo, pos) }
+            x:(@) _ pos:pos() "*" end:pos() _ y:@ { binop(x, y, BinOp::Multiply) }
+            x:(@) _ pos:pos() "/" end:pos() _ y:@ { binop(x, y, BinOp::Divide) }
+            x:(@) _ pos:pos() "%" end:pos() _ y:@ { binop(x, y, BinOp::Modulo) }
             --
-            pos:pos() "!" _ x:@ { Expr::UnOp(Box::new(x), UnOp::LogicNot, pos) }
-            pos:pos() "~" _ x:@ { Expr::UnOp(Box::new(x), UnOp::BitNot, pos) }
-            pos:pos() "-" _ x:@ { Expr::UnOp(Box::new(x), UnOp::Neg, pos) }
-            pos:pos() keyword("new") _ id:ident() _ "(" _ params:commasep(<expr()>) _ ")"
-                { Expr::New(TypeName::basic_owned(id.to_owned()), params, pos) }
+            "!" _ expr:@ { unop(expr, UnOp::LogicNot) }
+            "~" _ expr:@ { unop(expr, UnOp::BitNot) }
+            "-" _ expr:@ { unop(expr, UnOp::Neg) }
+
+            pos:pos() keyword("new") _ id:ident() _ "(" _ params:commasep(<expr()>) _ ")" end:pos() {
+                Expr::New(TypeName::basic_owned(id.to_owned()), params, Span::new(pos, end))
+            }
             --
-            expr:(@) _ pos:pos() "[" _ idx:expr() _ "]"
-                { Expr::ArrayElem(Box::new(expr), Box::new(idx), pos) }
-            expr:(@) _ pos:pos() "." _ ident:ident() _ "(" _ params:commasep(<expr()>) _ ")"
-                { Expr::MethodCall(Box::new(expr), ident, params, pos) }
-            expr:(@) _ pos:pos() "." _ ident:ident()
-                { Expr::Member(Box::new(expr), ident, pos) }
-            expr:(@) _ pos:pos() keyword("as") _ type_:type_()
-                { Expr::Cast(type_, Box::new(expr), pos) }
-            pos:pos() "[" _ exprs:commasep(<expr()>)_ "]" { Expr::ArrayLit(exprs, None, pos) }
+            expr:(@) _ "[" _ idx:expr() _ "]" high:pos() {
+                let span = expr.span();
+                Expr::ArrayElem(Box::new(expr), Box::new(idx), Span { high, ..span })
+            }
+            expr:(@) _ "." _ ident:ident() _ "(" _ params:commasep(<expr()>) _ ")" high:pos() {
+                let span = expr.span();
+                Expr::MethodCall(Box::new(expr), ident, params, Span { high, ..span })
+            }
+            expr:(@) _ "." _ ident:ident() high:pos() {
+                let span = expr.span();
+                Expr::Member(Box::new(expr), ident, Span { high, ..span })
+            }
+            expr:(@) _ keyword("as") _ type_:type_() high:pos() {
+                let span = expr.span();
+                Expr::Cast(type_, Box::new(expr), Span { high, ..span })
+            }
+            pos:pos() "[" _ exprs:commasep(<expr()>)_ "]" end:pos() {
+                Expr::ArrayLit(exprs, None, Span::new(pos, end))
+            }
             "(" _ v:expr() _ ")" { v }
-            keyword("null") { Expr::Null }
-            pos:pos() keyword("this") { Expr::This(pos) }
-            pos:pos() keyword("super") { Expr::Super(pos) }
-            pos:pos() cons:constant() { Expr::Constant(cons, pos) }
-            pos:pos() id:ident() _ "(" _ params:commasep(<expr()>) _ ")"
-                { Expr::Call(id, params, pos) }
-            pos:pos() id:ident()
-                { Expr::Ident(id, pos) }
+            pos:pos() keyword("null") end:pos() {
+                Expr::Null(Span::new(pos, end))
+            }
+            pos:pos() keyword("this") end:pos() {
+                Expr::This(Span::new(pos, end)) }
+            pos:pos() keyword("super") end:pos() {
+                Expr::Super(Span::new(pos, end))
+            }
+            pos:pos() str:interpolated_string() end:pos() {
+                Expr::InterpolatedString(str.0, str.1, Span::new(pos, end))
+            }
+            pos:pos() cons:constant() end:pos() {
+                Expr::Constant(cons, Span::new(pos, end))
+            }
+            pos:pos() id:ident() _ "(" _ params:commasep(<expr()>) _ ")" end:pos() {
+                Expr::Call(id, params, Span::new(pos, end))
+            }
+            pos:pos() id:ident() end:pos() {
+                Expr::Ident(id, Span::new(pos, end))
+            }
         }
     }
+}
+
+#[inline]
+fn binop(lhs: Expr<SourceAst>, rhs: Expr<SourceAst>, op: BinOp) -> Expr<SourceAst> {
+    let span = lhs.span().merge(rhs.span());
+    Expr::BinOp(Box::new(lhs), Box::new(rhs), op, span)
+}
+
+#[inline]
+fn unop(expr: Expr<SourceAst>, op: UnOp) -> Expr<SourceAst> {
+    let span = expr.span();
+    Expr::UnOp(Box::new(expr), op, span)
 }
 
 #[cfg(test)]
@@ -442,8 +510,7 @@ mod tests {
         let expr = lang::expr("3.0 ? 5.0 : 5 + 4", Pos::ZERO).unwrap();
         assert_eq!(
             format!("{:?}", expr),
-            "Conditional(Constant(F32(3.0), Pos(0)), Constant(F32(5.0), Pos(6)), BinOp(Constant(I32(5), Pos(12)), \
-             Constant(I32(4), Pos(16)), Add, Pos(14)), Pos(4))"
+            "Conditional(Constant(F32(3.0), Span { low: Pos(0), high: Pos(3) }), Constant(F32(5.0), Span { low: Pos(6), high: Pos(9) }), BinOp(Constant(I32(5), Span { low: Pos(12), high: Pos(13) }), Constant(I32(4), Span { low: Pos(16), high: Pos(17) }), Add, Span { low: Pos(12), high: Pos(17) }), Span { low: Pos(0), high: Pos(17) })"
         );
     }
 
@@ -462,7 +529,7 @@ mod tests {
         .unwrap();
         assert_eq!(
             format!("{:?}", module.entries),
-            r#"[Class(ClassSource { qualifiers: Qualifiers([Public]), name: Owned("A"), base: Some(Owned("IScriptable")), members: [Field(FieldSource { declaration: Declaration { annotations: [], qualifiers: Qualifiers([Private, Const]), name: Owned("m_field"), pos: Pos(53) }, type_: TypeName { name: Owned("Int32"), arguments: [] } }), Function(FunctionSource { declaration: Declaration { annotations: [], qualifiers: Qualifiers([Public]), name: Owned("GetField"), pos: Pos(104) }, type_: Some(TypeName { name: Owned("Int32"), arguments: [] }), parameters: [], body: Some(Seq { exprs: [Return(Some(Member(This(Pos(165)), Owned("m_field"), Pos(169))), Pos(158))] }) })], pos: Pos(0) })]"#
+            r#"[Class(ClassSource { qualifiers: Qualifiers([Public]), name: Owned("A"), base: Some(Owned("IScriptable")), members: [Field(FieldSource { declaration: Declaration { annotations: [], qualifiers: Qualifiers([Private, Const]), name: Owned("m_field"), span: Span { low: Pos(53), high: Pos(78) } }, type_: TypeName { name: Owned("Int32"), arguments: [] } }), Function(FunctionSource { declaration: Declaration { annotations: [], qualifiers: Qualifiers([Public]), name: Owned("GetField"), span: Span { low: Pos(104), high: Pos(124) } }, type_: Some(TypeName { name: Owned("Int32"), arguments: [] }), parameters: [], body: Some(Seq { exprs: [Return(Some(Member(This(Span { low: Pos(165), high: Pos(169) }), Owned("m_field"), Span { low: Pos(165), high: Pos(177) })), Span { low: Pos(158), high: Pos(178) })] }), span: Span { low: Pos(104), high: Pos(196) } })], span: Span { low: Pos(0), high: Pos(211) } })]"#
         );
     }
 
@@ -477,7 +544,7 @@ mod tests {
         .unwrap();
         assert_eq!(
             format!("{:?}", module.entries),
-            r#"[Function(FunctionSource { declaration: Declaration { annotations: [], qualifiers: Qualifiers([Public, Static]), name: Owned("GetField"), pos: Pos(0) }, type_: Some(TypeName { name: Owned("Uint64"), arguments: [] }), parameters: [ParameterSource { qualifiers: Qualifiers([]), name: Owned("optimum"), type_: TypeName { name: Owned("Uint64"), arguments: [] } }], body: Some(Seq { exprs: [Return(Some(Conditional(BinOp(Member(This(Pos(80)), Owned("m_field"), Pos(84)), Ident(Owned("optimum"), Pos(95)), Greater, Pos(93)), Member(This(Pos(105)), Owned("m_field"), Pos(109)), Ident(Owned("optimum"), Pos(120)), Pos(103))), Pos(73))] }) })]"#
+            r#"[Function(FunctionSource { declaration: Declaration { annotations: [], qualifiers: Qualifiers([Public, Static]), name: Owned("GetField"), span: Span { low: Pos(0), high: Pos(27) } }, type_: Some(TypeName { name: Owned("Uint64"), arguments: [] }), parameters: [ParameterSource { qualifiers: Qualifiers([]), name: Owned("optimum"), type_: TypeName { name: Owned("Uint64"), arguments: [] } }], body: Some(Seq { exprs: [Return(Some(Conditional(BinOp(Member(This(Span { low: Pos(80), high: Pos(84) }), Owned("m_field"), Span { low: Pos(80), high: Pos(92) }), Ident(Owned("optimum"), Span { low: Pos(95), high: Pos(102) }), Greater, Span { low: Pos(80), high: Pos(102) }), Member(This(Span { low: Pos(105), high: Pos(109) }), Owned("m_field"), Span { low: Pos(105), high: Pos(117) }), Ident(Owned("optimum"), Span { low: Pos(120), high: Pos(127) }), Span { low: Pos(80), high: Pos(127) })), Span { low: Pos(73), high: Pos(128) })] }), span: Span { low: Pos(0), high: Pos(143) } })]"#
         );
     }
 
@@ -493,7 +560,7 @@ mod tests {
         .unwrap();
         assert_eq!(
             format!("{:?}", stmt),
-            r#"While(BinOp(Ident(Owned("i"), Pos(6)), Constant(I32(1000), Pos(10)), Less, Pos(8)), Seq { exprs: [BinOp(Member(This(Pos(33)), Owned("counter"), Pos(37)), Member(Ident(Owned("Object"), Pos(49)), Owned("CONSTANT"), Pos(55)), AssignAdd, Pos(46)), BinOp(Ident(Owned("i"), Pos(82)), Constant(I32(1), Pos(87)), AssignAdd, Pos(84))] }, Pos(0))"#
+            r#"While(BinOp(Ident(Owned("i"), Span { low: Pos(6), high: Pos(7) }), Constant(I32(1000), Span { low: Pos(10), high: Pos(14) }), Less, Span { low: Pos(6), high: Pos(14) }), Seq { exprs: [BinOp(Member(This(Span { low: Pos(33), high: Pos(37) }), Owned("counter"), Span { low: Pos(33), high: Pos(45) }), Member(Ident(Owned("Object"), Span { low: Pos(49), high: Pos(55) }), Owned("CONSTANT"), Span { low: Pos(49), high: Pos(64) }), AssignAdd, Span { low: Pos(33), high: Pos(64) }), BinOp(Ident(Owned("i"), Span { low: Pos(82), high: Pos(83) }), Constant(I32(1), Span { low: Pos(87), high: Pos(88) }), AssignAdd, Span { low: Pos(82), high: Pos(88) })] }, Span { low: Pos(0), high: Pos(104) })"#
         );
     }
 
@@ -510,7 +577,7 @@ mod tests {
         .unwrap();
         assert_eq!(
             format!("{:?}", stmt),
-            r#"If(Member(This(Pos(3)), Owned("m_fixBugs"), Pos(7)), Seq { exprs: [MethodCall(This(Pos(36)), Owned("NoBugs"), [], Pos(40))] }, Some(Seq { exprs: [MethodCall(This(Pos(89)), Owned("Bugs"), [], Pos(93))] }), Pos(0))"#
+            r#"If(Member(This(Span { low: Pos(3), high: Pos(7) }), Owned("m_fixBugs"), Span { low: Pos(3), high: Pos(17) }), Seq { exprs: [MethodCall(This(Span { low: Pos(36), high: Pos(40) }), Owned("NoBugs"), [], Span { low: Pos(36), high: Pos(49) })] }, Some(Seq { exprs: [MethodCall(This(Span { low: Pos(89), high: Pos(93) }), Owned("Bugs"), [], Span { low: Pos(89), high: Pos(100) })] }), Span { low: Pos(0), high: Pos(116) })"#
         );
     }
 
@@ -531,7 +598,7 @@ mod tests {
         .unwrap();
         assert_eq!(
             format!("{:?}", stmt),
-            r#"Switch(Ident(Owned("value"), Pos(7)), [SwitchCase { matcher: Constant(String(String, "0"), Pos(37)), body: Seq { exprs: [] } }, SwitchCase { matcher: Constant(String(String, "1"), Pos(64)), body: Seq { exprs: [Call(Owned("Log"), [Constant(String(String, "0 or 1"), Pos(93))], Pos(89))] } }, SwitchCase { matcher: Constant(String(String, "2"), Pos(126)), body: Seq { exprs: [Break(Pos(151))] } }], Some(Seq { exprs: [Call(Owned("Log"), [Constant(String(String, "default"), Pos(208))], Pos(204))] }))"#
+            r#"Switch(Ident(Owned("value"), Span { low: Pos(7), high: Pos(12) }), [SwitchCase { matcher: Constant(String(String, "0"), Span { low: Pos(37), high: Pos(40) }), body: Seq { exprs: [] } }, SwitchCase { matcher: Constant(String(String, "1"), Span { low: Pos(64), high: Pos(67) }), body: Seq { exprs: [Call(Owned("Log"), [Constant(String(String, "0 or 1"), Span { low: Pos(93), high: Pos(101) })], Span { low: Pos(89), high: Pos(102) })] } }, SwitchCase { matcher: Constant(String(String, "2"), Span { low: Pos(126), high: Pos(129) }), body: Seq { exprs: [Break(Span { low: Pos(151), high: Pos(157) })] } }], Some(Seq { exprs: [Call(Owned("Log"), [Constant(String(String, "default"), Span { low: Pos(208), high: Pos(217) })], Span { low: Pos(204), high: Pos(218) })] }), Span { low: Pos(0), high: Pos(233) })"#
         );
     }
 
@@ -551,7 +618,7 @@ mod tests {
         .unwrap();
         assert_eq!(
             format!("{:?}", module.entries),
-            r#"[Class(ClassSource { qualifiers: Qualifiers([]), name: Owned("Test"), base: None, members: [Field(FieldSource { declaration: Declaration { annotations: [], qualifiers: Qualifiers([Private]), name: Owned("m_field"), pos: Pos(130) }, type_: TypeName { name: Owned("String"), arguments: [] } })], pos: Pos(101) })]"#
+            r#"[Class(ClassSource { qualifiers: Qualifiers([]), name: Owned("Test"), base: None, members: [Field(FieldSource { declaration: Declaration { annotations: [], qualifiers: Qualifiers([Private]), name: Owned("m_field"), span: Span { low: Pos(130), high: Pos(149) } }, type_: TypeName { name: Owned("String"), arguments: [] } })], span: Span { low: Pos(101), high: Pos(189) } })]"#
         );
     }
 
@@ -569,7 +636,7 @@ mod tests {
         .unwrap();
         assert_eq!(
             format!("{:?}", module.entries),
-            r#"[Class(ClassSource { qualifiers: Qualifiers([]), name: Owned("Test"), base: None, members: [Field(FieldSource { declaration: Declaration { annotations: [], qualifiers: Qualifiers([Private]), name: Owned("m_field"), pos: Pos(114) }, type_: TypeName { name: Owned("String"), arguments: [] } })], pos: Pos(13) })]"#
+            r#"[Class(ClassSource { qualifiers: Qualifiers([]), name: Owned("Test"), base: None, members: [Field(FieldSource { declaration: Declaration { annotations: [], qualifiers: Qualifiers([Private]), name: Owned("m_field"), span: Span { low: Pos(114), high: Pos(133) } }, type_: TypeName { name: Owned("String"), arguments: [] } })], span: Span { low: Pos(13), high: Pos(156) } })]"#
         );
     }
 
@@ -596,5 +663,18 @@ mod tests {
         );
 
         assert!(mangled.is_err());
+    }
+
+    #[test]
+    fn parse_interpolated_string() {
+        let str = lang::interpolated_string(
+            r#"s"My name is \(name) and I am \(currentYear - birthYear) years old""#,
+            Pos::ZERO,
+        )
+        .unwrap();
+        assert_eq!(
+            format!("{:?}", str),
+            r#"("My name is ", [(Ident(Owned("name"), Span { low: Pos(15), high: Pos(19) }), " and I am "), (BinOp(Ident(Owned("currentYear"), Span { low: Pos(32), high: Pos(43) }), Ident(Owned("birthYear"), Span { low: Pos(46), high: Pos(55) }), Subtract, Span { low: Pos(32), high: Pos(55) }), " years old")])"#
+        );
     }
 }

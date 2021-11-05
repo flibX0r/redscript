@@ -149,7 +149,7 @@ impl Assembler {
             Expr::Seq(seq) => {
                 self.assemble_seq(seq, scope, pool, exit)?;
             }
-            Expr::Switch(expr, cases, default) => {
+            Expr::Switch(expr, cases, default, _) => {
                 let type_ = type_of(&expr, scope, pool)?;
                 let first_case_label = self.new_label();
                 let mut next_case_label = self.new_label();
@@ -269,7 +269,7 @@ impl Assembler {
                 }
             }
 
-            Expr::Null => {
+            Expr::Null(_) => {
                 self.emit(Instr::Null);
             }
             Expr::This(_) | Expr::Super(_) => {
@@ -279,6 +279,7 @@ impl Assembler {
                 self.emit(Instr::Jump(exit.unwrap()));
             }
             Expr::ArrayLit(_, _, pos) => return Err(Error::unsupported("ArrayLit", pos)),
+            Expr::InterpolatedString(_, _, pos) => return Err(Error::unsupported("InterpolatedString", pos)),
             Expr::ForIn(_, _, _, pos) => return Err(Error::unsupported("For-in", pos)),
             Expr::BinOp(_, _, _, pos) => return Err(Error::unsupported("BinOp", pos)),
             Expr::UnOp(_, _, pos) => return Err(Error::unsupported("UnOp", pos)),
@@ -438,7 +439,10 @@ impl Assembler {
                 self.emit(Instr::ArrayLast(get_arg_type(0)?));
             }
             IntrinsicOp::ToString => {
-                self.emit(Instr::ToString(get_arg_type(0)?));
+                match type_of(&args[0], scope, pool)? {
+                    TypeId::Variant => self.emit(Instr::VariantToString),
+                    any => self.emit(Instr::ToString(scope.get_type_index(&any, pool)?))
+                }
             }
             IntrinsicOp::EnumInt => {
                 self.emit(Instr::EnumToI32(get_arg_type(0)?, 4));
@@ -453,6 +457,15 @@ impl Assembler {
             IntrinsicOp::FromVariant => {
                 let type_idx = scope.get_type_index(return_type, pool)?;
                 self.emit(Instr::FromVariant(type_idx));
+            }
+            IntrinsicOp::VariantIsRef => {
+                self.emit(Instr::VariantIsRef);
+            }
+            IntrinsicOp::VariantIsArray => {
+                self.emit(Instr::VariantIsArray);
+            }
+            IntrinsicOp::VariantTypeName => {
+                self.emit(Instr::VariantTypeName);
             }
             IntrinsicOp::AsRef => {
                 self.emit(Instr::AsRef(get_arg_type(0)?));
@@ -469,6 +482,7 @@ impl Assembler {
             IntrinsicOp::IsDefined => match type_of(&args[0], scope, pool)? {
                 TypeId::Ref(_) => self.emit(Instr::RefToBool),
                 TypeId::WeakRef(_) => self.emit(Instr::WeakRefToBool),
+                TypeId::Variant => self.emit(Instr::VariantIsDefined),
                 _ => panic!("Invalid ToBool parameter"),
             },
         };

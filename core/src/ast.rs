@@ -1,11 +1,13 @@
 use std::fmt::{self, Debug, Display};
 use std::hash::Hash;
-use std::ops::Add;
-use std::rc::Rc;
+use std::ops::{Add, Sub};
 
+use enum_as_inner::EnumAsInner;
 use strum::{Display, EnumString, IntoStaticStr};
 
-#[derive(Debug)]
+use crate::Ref;
+
+#[derive(Debug, EnumAsInner)]
 pub enum Expr<Name: NameKind>
 where
     Name: NameKind,
@@ -16,31 +18,32 @@ where
     Name::Member: Debug,
     Name::Type: Debug,
 {
-    Ident(Name::Reference, Pos),
-    Constant(Constant, Pos),
-    ArrayLit(Vec<Self>, Option<Name::Type>, Pos),
-    Declare(Name::Local, Option<Name::Type>, Option<Box<Self>>, Pos),
-    Cast(Name::Type, Box<Self>, Pos),
-    Assign(Box<Self>, Box<Self>, Pos),
-    Call(Name::Callable, Vec<Self>, Pos),
-    MethodCall(Box<Self>, Name::Function, Vec<Self>, Pos),
-    Member(Box<Self>, Name::Member, Pos),
-    ArrayElem(Box<Self>, Box<Self>, Pos),
-    New(Name::Type, Vec<Self>, Pos),
-    Return(Option<Box<Self>>, Pos),
+    Ident(Name::Reference, Span),
+    Constant(Constant, Span),
+    ArrayLit(Vec<Self>, Option<Name::Type>, Span),
+    InterpolatedString(Ref<String>, Vec<(Self, Ref<String>)>, Span),
+    Declare(Name::Local, Option<Name::Type>, Option<Box<Self>>, Span),
+    Cast(Name::Type, Box<Self>, Span),
+    Assign(Box<Self>, Box<Self>, Span),
+    Call(Name::Callable, Vec<Self>, Span),
+    MethodCall(Box<Self>, Name::Function, Vec<Self>, Span),
+    Member(Box<Self>, Name::Member, Span),
+    ArrayElem(Box<Self>, Box<Self>, Span),
+    New(Name::Type, Vec<Self>, Span),
+    Return(Option<Box<Self>>, Span),
     Seq(Seq<Name>),
-    Switch(Box<Self>, Vec<SwitchCase<Name>>, Option<Seq<Name>>),
-    Goto(Target, Pos),
-    If(Box<Self>, Seq<Name>, Option<Seq<Name>>, Pos),
-    Conditional(Box<Self>, Box<Self>, Box<Self>, Pos),
-    While(Box<Self>, Seq<Name>, Pos),
-    ForIn(Name::Local, Box<Self>, Seq<Name>, Pos),
-    BinOp(Box<Self>, Box<Self>, BinOp, Pos),
-    UnOp(Box<Self>, UnOp, Pos),
-    This(Pos),
-    Super(Pos),
-    Break(Pos),
-    Null,
+    Switch(Box<Self>, Vec<SwitchCase<Name>>, Option<Seq<Name>>, Span),
+    Goto(Target, Span),
+    If(Box<Self>, Seq<Name>, Option<Seq<Name>>, Span),
+    Conditional(Box<Self>, Box<Self>, Box<Self>, Span),
+    While(Box<Self>, Seq<Name>, Span),
+    ForIn(Name::Local, Box<Self>, Seq<Name>, Span),
+    BinOp(Box<Self>, Box<Self>, BinOp, Span),
+    UnOp(Box<Self>, UnOp, Span),
+    This(Span),
+    Super(Span),
+    Break(Span),
+    Null(Span),
 }
 
 pub trait NameKind {
@@ -83,11 +86,46 @@ where
             _ => false,
         }
     }
+
+    pub fn span(&self) -> Span {
+        match self {
+            Expr::Ident(_, span) => *span,
+            Expr::Constant(_, span) => *span,
+            Expr::ArrayLit(_, _, span) => *span,
+            Expr::InterpolatedString(_, _, span) => *span,
+            Expr::Declare(_, _, _, span) => *span,
+            Expr::Cast(_, _, span) => *span,
+            Expr::Assign(_, _, span) => *span,
+            Expr::Call(_, _, span) => *span,
+            Expr::MethodCall(_, _, _, span) => *span,
+            Expr::Member(_, _, span) => *span,
+            Expr::ArrayElem(_, _, span) => *span,
+            Expr::New(_, _, span) => *span,
+            Expr::Return(_, span) => *span,
+            Expr::Seq(seq) => {
+                let start = seq.exprs.first().map(Self::span).unwrap_or_default();
+                let end = seq.exprs.last().map(Self::span).unwrap_or_default();
+                start.merge(end)
+            }
+            Expr::Switch(_, _, _, span) => *span,
+            Expr::Goto(_, span) => *span,
+            Expr::If(_, _, _, span) => *span,
+            Expr::Conditional(_, _, _, span) => *span,
+            Expr::While(_, _, span) => *span,
+            Expr::ForIn(_, _, _, span) => *span,
+            Expr::BinOp(_, _, _, span) => *span,
+            Expr::UnOp(_, _, span) => *span,
+            Expr::This(span) => *span,
+            Expr::Super(span) => *span,
+            Expr::Break(span) => *span,
+            Expr::Null(span) => *span,
+        }
+    }
 }
 
 #[derive(Debug, Clone)]
 pub enum Constant {
-    String(Literal, Rc<String>),
+    String(Literal, Ref<String>),
     F32(f32),
     F64(f64),
     I32(i32),
@@ -100,17 +138,17 @@ pub enum Constant {
 #[derive(Debug, Clone, Eq, PartialOrd, Ord)]
 pub enum Ident {
     Static(&'static str),
-    Owned(Rc<String>),
+    Owned(Ref<String>),
 }
 
 impl Ident {
     pub fn new(str: String) -> Ident {
-        Ident::Owned(Rc::new(str))
+        Ident::Owned(Ref::new(str))
     }
 
-    pub fn to_owned(&self) -> Rc<String> {
+    pub fn to_owned(&self) -> Ref<String> {
         match self {
-            Ident::Static(str) => Rc::new(str.to_string()),
+            Ident::Static(str) => Ref::new(str.to_string()),
             Ident::Owned(rc) => rc.clone(),
         }
     }
@@ -316,7 +354,7 @@ pub enum Literal {
     TweakDbId,
 }
 
-#[derive(Debug, Copy, Clone, PartialEq, Eq, PartialOrd, Ord)]
+#[derive(Debug, Default, Copy, Clone, PartialEq, Eq, PartialOrd, Ord)]
 pub struct Pos(pub u32);
 
 impl Pos {
@@ -336,9 +374,47 @@ impl fmt::Display for Pos {
 impl Add<usize> for Pos {
     type Output = Pos;
 
-    #[inline(always)]
+    #[inline]
     fn add(self, rhs: usize) -> Pos {
         Pos(self.0 + rhs as u32)
+    }
+}
+
+impl Sub<usize> for Pos {
+    type Output = Pos;
+
+    #[inline]
+    fn sub(self, rhs: usize) -> Pos {
+        Pos(self.0 - rhs as u32)
+    }
+}
+
+impl From<Pos> for usize {
+    #[inline]
+    fn from(pos: Pos) -> Self {
+        pos.0 as usize
+    }
+}
+
+#[derive(Debug, Default, Copy, Clone, PartialEq, Eq)]
+pub struct Span {
+    pub low: Pos,
+    pub high: Pos,
+}
+
+impl Span {
+    pub const ZERO: Span = Span::new(Pos::ZERO, Pos::ZERO);
+
+    pub const fn new(low: Pos, high: Pos) -> Self {
+        Self { low, high }
+    }
+
+    pub fn merge(&self, other: Span) -> Span {
+        Span::new(self.low.min(other.low), self.high.max(other.high))
+    }
+
+    pub fn contains(&self, pos: Pos) -> bool {
+        self.low <= pos && self.high > pos
     }
 }
 
@@ -393,7 +469,7 @@ impl TypeName {
         }
     }
 
-    pub fn basic_owned(name: Rc<String>) -> Self {
+    pub fn basic_owned(name: Ref<String>) -> Self {
         TypeName {
             name: Ident::Owned(name),
             arguments: vec![],
@@ -449,7 +525,7 @@ impl TypeName {
     }
 
     fn from_parts<'a>(name: &'a str, mut parts: impl Iterator<Item = &'a str>) -> Option<TypeName> {
-        let name = Rc::new(name.to_owned());
+        let name = Ref::new(name.to_owned());
         match parts.next() {
             Some(tail) => {
                 let arg = Self::from_parts(tail, parts)?;

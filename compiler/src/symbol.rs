@@ -1,13 +1,13 @@
 use std::borrow::Cow;
 use std::str::FromStr;
 
-use redscript::ast::{BinOp, Ident, Pos, TypeName};
+use redscript::ast::{BinOp, Ident, Span, TypeName};
 use redscript::bundle::{ConstantPool, PoolIndex};
 use redscript::definition::{AnyDefinition, Class, Enum, Function, Visibility};
 use redscript::error::Error;
 use sequence_trie::SequenceTrie;
 
-use crate::parser::{FunctionSource, Qualifier};
+use crate::parser::{Annotation, FunctionSource, Qualifier};
 use crate::scope::Scope;
 
 pub struct SymbolMap {
@@ -64,19 +64,19 @@ impl SymbolMap {
 
     pub fn populate_import(&self, import: Import, scope: &mut Scope, visibility: Visibility) -> Result<(), Error> {
         match import {
-            Import::Exact(path, pos) => {
+            Import::Exact(_, path, pos) => {
                 if let Some(symbol) = self.get_symbol(&path, pos)?.visible(visibility) {
                     scope.add_symbol(path.last().unwrap(), symbol);
                 }
             }
-            Import::All(path, pos) => {
+            Import::All(_, path, pos) => {
                 for (ident, symbol) in self.get_direct_children(&path, pos)? {
                     if let Some(symbol) = symbol.clone().visible(visibility) {
                         scope.add_symbol(ident, symbol.clone());
                     }
                 }
             }
-            Import::Selected(path, names, pos) => {
+            Import::Selected(_, path, names, pos) => {
                 for name in names {
                     let path = path.with_child(name);
                     if let Some(symbol) = self.get_symbol(&path, pos)?.visible(visibility) {
@@ -88,7 +88,7 @@ impl SymbolMap {
         Ok(())
     }
 
-    pub fn get_symbol(&self, path: &ModulePath, pos: Pos) -> Result<Symbol, Error> {
+    pub fn get_symbol(&self, path: &ModulePath, pos: Span) -> Result<Symbol, Error> {
         self.symbols
             .get(path)
             .cloned()
@@ -98,7 +98,7 @@ impl SymbolMap {
     fn get_direct_children(
         &self,
         path: &ModulePath,
-        pos: Pos,
+        pos: Span,
     ) -> Result<impl Iterator<Item = (Ident, &Symbol)>, Error> {
         let node = self
             .symbols
@@ -139,11 +139,21 @@ impl Symbol {
     }
 }
 
-#[derive(Debug, Clone)]
+#[derive(Debug)]
 pub enum Import {
-    Exact(ModulePath, Pos),
-    Selected(ModulePath, Vec<Ident>, Pos),
-    All(ModulePath, Pos),
+    Exact(Vec<Annotation>, ModulePath, Span),
+    Selected(Vec<Annotation>, ModulePath, Vec<Ident>, Span),
+    All(Vec<Annotation>, ModulePath, Span),
+}
+
+impl Import {
+    pub fn annotations(&self) -> &[Annotation] {
+        match self {
+            Import::Exact(anns, _, _) => anns,
+            Import::Selected(anns, _, _, _) => anns,
+            Import::All(anns, _, _) => anns,
+        }
+    }
 }
 
 #[derive(Debug, Clone, PartialEq, Eq, Hash)]

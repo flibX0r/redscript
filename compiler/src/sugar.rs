@@ -1,11 +1,11 @@
-use std::rc::Rc;
 use std::vec;
 
-use redscript::ast::{BinOp, Constant, Expr, Ident, Pos, Seq, TypeName};
+use redscript::ast::{BinOp, Constant, Expr, Ident, Literal, Seq, Span, TypeName};
 use redscript::bundle::{ConstantPool, PoolIndex};
 use redscript::bytecode::IntrinsicOp;
 use redscript::definition::{Definition, Local, LocalFlags};
 use redscript::error::Error;
+use redscript::Ref;
 
 use crate::scope::{Reference, Scope, TypeId, Value};
 use crate::symbol::{FunctionSignature, FunctionSignatureBuilder};
@@ -39,7 +39,7 @@ impl<'a> Desugar<'a> {
         self.prefix_exprs.push(expr)
     }
 
-    fn get_function(&self, signature: FunctionSignature, pos: Pos) -> Result<Callable, Error> {
+    fn get_function(&self, signature: FunctionSignature, pos: Span) -> Result<Callable, Error> {
         let fun_idx = self
             .scope
             .resolve_function(Ident::new(signature.name().to_owned()), pos)?
@@ -51,7 +51,7 @@ impl<'a> Desugar<'a> {
 
     fn fresh_local(&mut self, type_: &TypeId) -> Result<Reference, Error> {
         let fun_idx = self.scope.function.unwrap();
-        let name_idx = self.pool.names.add(Rc::new(format!("synthetic${}", self.name_count)));
+        let name_idx = self.pool.names.add(Ref::new(format!("synthetic${}", self.name_count)));
         let type_idx = self.scope.get_type_index(type_, self.pool)?;
         let local = Local::new(type_idx, LocalFlags::new());
         let def = Definition::local(name_idx, fun_idx, local);
@@ -67,7 +67,7 @@ impl<'a> ExprTransformer<TypedAst> for Desugar<'a> {
         &mut self,
         exprs: Vec<Expr<TypedAst>>,
         type_: Option<TypeId>,
-        pos: Pos,
+        pos: Span,
     ) -> Result<Expr<TypedAst>, Error> {
         let type_ = TypeId::Array(Box::new(type_.unwrap()));
         let local = self.fresh_local(&type_)?;
@@ -80,12 +80,55 @@ impl<'a> ExprTransformer<TypedAst> for Desugar<'a> {
         Ok(Expr::Ident(local, pos))
     }
 
+    fn on_interpolated_string(
+        &mut self,
+        prefix: Ref<String>,
+        parts: Vec<(Expr<TypedAst>, Ref<String>)>,
+        pos: Span,
+    ) -> Result<Expr<TypedAst>, Error> {
+        let mut acc = Expr::Constant(Constant::String(Literal::String, prefix), pos);
+        let str_type = self.scope.resolve_type(&TypeName::STRING, self.pool, pos)?;
+
+        let add_str = FunctionSignatureBuilder::new(BinOp::Add.to_string())
+            .parameter(&TypeName::basic("Script_RefString"), false)
+            .parameter(&TypeName::basic("Script_RefString"), false)
+            .return_type(&TypeName::STRING);
+        let add_str = self.get_function(add_str, pos)?;
+
+        let as_ref = Callable::Intrinsic(IntrinsicOp::AsRef, TypeId::ScriptRef(Box::new(str_type.clone())));
+        let as_ref = |exp: Expr<TypedAst>| Expr::Call(as_ref.clone(), vec![exp], pos);
+
+        for (part, str) in parts {
+            let part = self.on_expr(part)?;
+
+            let part = match type_of(&part, self.scope, self.pool)? {
+                TypeId::Void => return Err(Error::unsupported("Formatting void", pos)),
+                TypeId::ScriptRef(idx) if idx.pretty(self.pool)?.as_ref() == "String" => part,
+                typ if typ.pretty(self.pool)?.as_ref() == "String" => as_ref(part),
+                _ => {
+                    let to_string = Callable::Intrinsic(IntrinsicOp::ToString, str_type.clone());
+                    as_ref(Expr::Call(to_string, vec![part], pos))
+                }
+            };
+
+            let combined = if str.is_empty() {
+                part
+            } else {
+                let str: Expr<TypedAst> = as_ref(Expr::Constant(Constant::String(Literal::String, str), pos));
+                as_ref(Expr::Call(add_str.clone(), vec![part, str], pos))
+            };
+
+            acc = Expr::Call(add_str.clone(), vec![as_ref(acc), combined], pos);
+        }
+        Ok(acc)
+    }
+
     fn on_for_in(
         &mut self,
         name: PoolIndex<Local>,
         array: Expr<TypedAst>,
         seq: Seq<TypedAst>,
-        pos: Pos,
+        pos: Span,
     ) -> Result<Expr<TypedAst>, Error> {
         let mut seq = self.on_seq(seq)?;
 

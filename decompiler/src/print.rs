@@ -1,11 +1,11 @@
 use std::io::Write;
-use std::rc::Rc;
 use std::str::FromStr;
 
 use redscript::ast::{BinOp, Constant, Expr, Ident, Literal, Seq, SourceAst, SwitchCase, UnOp};
 use redscript::bundle::ConstantPool;
 use redscript::definition::{AnyDefinition, Definition, Function, Type};
 use redscript::error::Error;
+use redscript::Ref;
 
 use crate::Decompiler;
 
@@ -38,7 +38,9 @@ pub fn write_definition<W: Write>(
             if class.flags.is_final() {
                 write!(out, "final ")?;
             }
-            if class.flags.is_native() {
+            if class.flags.is_import_only() {
+                write!(out, "importonly ")?;
+            } else if class.flags.is_native() {
                 write!(out, "native ")?;
             }
             if class.flags.is_struct() {
@@ -67,7 +69,7 @@ pub fn write_definition<W: Write>(
         }
         AnyDefinition::EnumValue(val) => {
             let name = if definition.name.is_undefined() {
-                Rc::new("Undefined".to_owned())
+                Ref::new("Undefined".to_owned())
             } else {
                 pool.names.get(definition.name)?
             };
@@ -160,10 +162,10 @@ pub fn write_definition<W: Write>(
             if field.flags.is_inline() {
                 write!(out, "inline ")?;
             }
-            if field.flags.is_rep() {
+            if field.flags.is_replicated() {
                 write!(out, "replicated ")?;
             }
-            if field.flags.is_edit() {
+            if field.flags.is_editable() {
                 write!(out, "edit ")?;
             }
             if field.flags.is_native() {
@@ -310,7 +312,7 @@ fn write_expr_nested<W: Write>(
         }
         Expr::Return(None, _) => write!(out, "return")?,
         Expr::Seq(exprs) => write_seq(out, exprs, verbose, depth)?,
-        Expr::Switch(expr, cases, default) => {
+        Expr::Switch(expr, cases, default, _) => {
             write!(out, "switch ")?;
             write_expr(out, expr, verbose, 0)?;
             writeln!(out, " {{")?;
@@ -365,10 +367,11 @@ fn write_expr_nested<W: Write>(
             write_unop(out, val, *op, verbose)?;
         }
         Expr::Break(_) => write!(out, "break")?,
-        Expr::Null => write!(out, "null")?,
+        Expr::Null(_) => write!(out, "null")?,
         Expr::This(_) => write!(out, "this")?,
         Expr::Super(_) => write!(out, "super")?,
         Expr::ArrayLit(_, _, _) => panic!("Shouldn't get here"),
+        Expr::InterpolatedString(_, _, _) => panic!("Shouldn't get here"),
         Expr::ForIn(_, _, _, _) => panic!("Shouldn't get here"),
     };
     Ok(())
