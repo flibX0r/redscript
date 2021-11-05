@@ -1,5 +1,6 @@
 use std::str::FromStr;
 use std::convert::TryFrom;
+use std::iter::FromIterator;
 
 use peg::error::ParseError;
 use peg::str::LineCol;
@@ -213,60 +214,78 @@ peg::parser! {
         rule keyword(id: &'static str) -> () =
             ##parse_string_literal(id) !['0'..='9' | 'a'..='z' | 'A'..='Z' | '_']
 
+        // Adds support for using an underscore as a visual separator
+        rule digits_hex() -> String
+            = h:$(['0'..='9' | 'a'..='f' | 'A'..='F' | '_']+) { h.replace("_", "") }
+        rule digits_dec() -> String
+            = d:$(['0'..='9' | '_']+) { d.replace("_", "") }
+        rule digits_oct() -> String
+            = o:$(['0'..='7' | '_']+) { o.replace("_", "") }
+        rule digits_bin() -> String
+            = b:$(['0'..='1' | '_']+) { b.replace("_", "") }
 
-        rule digits_hex() -> u64
-            = h:$(['0'..='9' | 'a'..='f' | 'A'..='F' | '_']+) {? u64::from_str_radix(&h.replace("_", ""), 16).or(Err("valid UInt64")) }
-        rule digits_dec() -> u64
-            = d:$(['0'..='9' | '_']+) {? u64::from_str_radix(&d.replace("_", ""), 10).or(Err("valid UInt64")) }
-        rule digits_oct() -> u64
-            = o:$(['0'..='7' | '_']+) {? u64::from_str_radix(&o.replace("_", ""), 8).or(Err("valid UInt64")) }
-        rule digits_bin() -> u64
-            = b:$(['0'..='1' | '_']+) {? u64::from_str_radix(&b.replace("_", ""), 2).or(Err("valid UInt64")) }
+        rule num_sign() -> String
+            = sign:$(['+'|'-']) { sign.to_string() }
+        rule num_exp() -> String
+            = exp_str:$(['e'|'E'] num_sign()? digits_dec())
+            { exp_str.to_string() }
 
-        rule number_unsigned() -> u64
-            = "0x" h:digits_hex() { h }
-            / "0o" o:digits_oct() { o }
-            / "0b" b:digits_bin() { b }
-            / d:digits_dec()      { d }
+        rule num_unsigned() -> u64
+            = "0x" h:digits_hex() {? u64::from_str_radix(&h, 16).or(Err("valid hexidecimal")) }
+            / "0o" o:digits_oct() {? u64::from_str_radix(&o,  8).or(Err("valid octal")) }
+            / "0b" b:digits_bin() {? u64::from_str_radix(&b,  2).or(Err("valid binary")) }
+            / d:digits_dec()      {? u64::from_str_radix(&d, 10).or(Err("valid decimal")) }
 
-        rule number_integer() -> Constant
-            = sign:$(['-'])? d:number_unsigned() suffix:$(['u'|'l']*)? {?
-                if sign == Some("-") {
-                    i32::try_from(d).map(|i| Constant::I32(-i))
-                    .or(i64::try_from(d).map(|i| Constant::I64(-i)))
-                    .or(Err("valid Int64"))
-                }
-                else {
-                    u32::try_from(d).map(Constant::U32)
-                    .or(u64::try_from(d).map(Constant::U64))
-                    .or(Err("valid Uint64"))
-                }
+        /// Integer literals are assumed to be unsigned as the unary negative operator has precedence
+        rule num_integer() -> Constant
+            = n:num_unsigned() ['u'|'l']?
+            {
+                // But we try and fit them in the smallest container possible
+                // for the greatest range of implicit conversion support
+                i32::try_from(n).map(Constant::I32)
+                .or(u32::try_from(n).map(Constant::U32))
+                .or(i64::try_from(n).map(Constant::I64))
+                .unwrap_or(Constant::U64(n))
             }
 
-        rule number_floating() -> Constant
-            = d:$(['+'|'-']? ['0'..='9'|'_']+ "." ['0'..='9'|'_']*) suffix:$(['d'])? {?
-                if suffix == Some("d") { f64::from_str(&d.replace("_", "")).map(Constant::F64).or(Err("valid Double")) }
-                else { f32::from_str(&d.replace("_", "")).map(Constant::F32).or(Err("valid Float")) }
+        /// Supports the same grammar as the f32/f64 from_str method
+        rule num_float_variations() -> String
+            = num_str:$(digits_dec()  "."? digits_dec()? num_exp()?) "d"  { num_str.to_string() }
+            / num_str:$(digits_dec()  "."? digits_dec()? num_exp())  "d"? { num_str.to_string() }
+            / num_str:$(digits_dec()? "."  digits_dec()  num_exp()?) "d"? { num_str.to_string() }
+            / num_str:$(digits_dec()  "."  digits_dec()? num_exp()?) "d"? { num_str.to_string() }
+
+        rule num_floating() -> Constant
+            = keyword("infinity") { Constant::F32(f32::INFINITY) }
+            / keyword("NaN")      { Constant::F32(f32::NAN) }
+            / num_str:num_float_variations() 
+            {?
+                f32::from_str(num_str.as_str()).map(Constant::F32)
+                .or(f64::from_str(num_str.as_str()).map(Constant::F64))
+                .or(Err("valid floating-point"))
             }
 
         rule number() -> Constant
-            = f:number_floating() { f }
-            / i:number_integer()  { i }
+            = f:num_floating() { f }
+            / i:num_integer()  { i }
 
-        rule escaped_char() -> String
-            = !['\\' | '\"'] c:$([_]) { String::from(c) }
-            / r#"\n"# { String::from('\n') }
-            / r#"\r"# { String::from('\r') }
-            / r#"\t"# { String::from('\t') }
-            / r#"\'"# { String::from('\'') }
-            / r#"\""# { String::from('\"') }
-            / r#"\\"# { String::from('\\') }
-            / "\\u{" u:$(['a'..='f' | 'A'..='F' | '0'..='9']*<1,6>) "}" {
-                String::from(char::from_u32(u32::from_str_radix(u, 16).unwrap()).unwrap())
+
+        rule escaped_char() -> char
+            = !['\\' | '\"'] c:$([_]) { char::from_str(c).unwrap() }
+            / r#"\n"# { '\n' }
+            / r#"\r"# { '\r' }
+            / r#"\t"# { '\t' }
+            / r#"\\"# { '\\' }
+            / r#"\'"# { '\'' }
+            / r#"\""# { '\"' }
+            / "\\u{" u:$(['a'..='f' | 'A'..='F' | '0'..='9']*<1,6>) "}"
+            {?
+                char::from_u32(u32::from_str_radix(u, 16).unwrap())
+                    .ok_or("Invalid character sequence")
             }
 
         rule string_contents() -> String
-            = s:escaped_char()* { s.join("") }
+            = s:escaped_char()* { String::from_iter(s) }
 
         pub rule escaped_string() -> String
             = "\"" s:string_contents() "\"" { s }

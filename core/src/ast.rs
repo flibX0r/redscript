@@ -123,7 +123,7 @@ where
     }
 }
 
-#[derive(Debug, Clone)]
+#[derive(Debug, Clone, Display)]
 pub enum Constant {
     String(Literal, Ref<String>),
     F32(f32),

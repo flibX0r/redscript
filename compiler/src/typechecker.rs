@@ -52,22 +52,51 @@ impl<'a> TypeChecker<'a> {
                 let cons = match expected {
                     Some(type_) => {
                         let type_name = type_.pretty(self.pool)?;
+                        let err = Err(Error::type_error(cons, type_name.clone(), *pos));
                         match cons {
-                            Constant::I32(i) if type_name == TypeName::FLOAT.pretty() => Constant::F32(*i as f32),
-                            Constant::I32(i) if type_name == TypeName::DOUBLE.pretty() => Constant::F64(*i as f64),
-                            Constant::I32(i) if type_name == TypeName::INT64.pretty() => Constant::I64((*i).into()),
+                            // I hate how this looks, could definitely be cleaner
+                            Constant::I32(i) if type_name == TypeName::INT64.pretty()  => Ok(Constant::I64((*i).into())),
+                            Constant::I32(i) if type_name == TypeName::UINT32.pretty() => u32::try_from(*i).map(Constant::U32).or(err),
+                            Constant::I32(i) if type_name == TypeName::UINT64.pretty() => u64::try_from(*i).map(Constant::U64).or(err),
+                            Constant::I32(i) if type_name == TypeName::FLOAT.pretty()  => f32::try_roundtrip(*i).map(Constant::F32).or(err),
+                            Constant::I32(i) if type_name == TypeName::DOUBLE.pretty() => Ok(Constant::F64((*i).into())),
 
-                            Constant::U32(u) if type_name == TypeName::INT32.pretty() => Constant::I32(*u as i32),
+                            Constant::I64(i) if type_name == TypeName::INT32.pretty()  => i32::try_from(*i).map(Constant::I32).or(err),
+                            Constant::I64(i) if type_name == TypeName::UINT32.pretty() => u32::try_from(*i).map(Constant::U32).or(err),
+                            Constant::I64(i) if type_name == TypeName::UINT64.pretty() => u64::try_from(*i).map(Constant::U64).or(err),
+                            Constant::I64(i) if type_name == TypeName::FLOAT.pretty()  => f32::try_roundtrip(*i).map(Constant::F32).or(err),
+                            Constant::I64(i) if type_name == TypeName::DOUBLE.pretty() => f64::try_roundtrip(*i).map(Constant::F64).or(err),
 
-                            Constant::U32(i) if type_name == TypeName::UINT64.pretty() => Constant::U64((*i).into()),
+                            Constant::U32(i) if type_name == TypeName::INT32.pretty()  => i32::try_from(*i).map(Constant::I32).or(err),
+                            Constant::U32(i) if type_name == TypeName::INT64.pretty()  => i64::try_from(*i).map(Constant::I64).or(err),
+                            Constant::U32(i) if type_name == TypeName::UINT64.pretty() => Ok(Constant::U64((*i).into())),
+                            Constant::U32(i) if type_name == TypeName::FLOAT.pretty()  => f32::try_roundtrip(*i).map(Constant::F32).or(err),
+                            Constant::U32(i) if type_name == TypeName::DOUBLE.pretty() => Ok(Constant::F64((*i).into())),
 
-                            Constant::F32(i) if type_name == TypeName::DOUBLE.pretty() => Constant::F64((*i).into()),
-                            other => other.clone(),
+                            Constant::U64(i) if type_name == TypeName::INT32.pretty()  => i32::try_from(*i).map(Constant::I32).or(err),
+                            Constant::U64(i) if type_name == TypeName::INT64.pretty()  => i64::try_from(*i).map(Constant::I64).or(err),
+                            Constant::U64(i) if type_name == TypeName::UINT32.pretty() => u32::try_from(*i).map(Constant::U32).or(err),
+                            Constant::U64(i) if type_name == TypeName::FLOAT.pretty()  => f32::try_roundtrip(*i).map(Constant::F32).or(err),
+                            Constant::U64(i) if type_name == TypeName::DOUBLE.pretty() => f64::try_roundtrip(*i).map(Constant::F64).or(err),
+
+                            Constant::F32(i) if type_name == TypeName::INT32.pretty()  => i32::try_roundtrip(*i).map(Constant::I32).or(err),
+                            Constant::F32(i) if type_name == TypeName::INT64.pretty()  => i64::try_roundtrip(*i).map(Constant::I64).or(err),
+                            Constant::F32(i) if type_name == TypeName::UINT32.pretty() => u32::try_roundtrip(*i).map(Constant::U32).or(err),
+                            Constant::F32(i) if type_name == TypeName::UINT64.pretty() => u64::try_roundtrip(*i).map(Constant::U64).or(err),
+                            Constant::F32(i) if type_name == TypeName::DOUBLE.pretty() => Ok(Constant::F64((*i).into())),
+
+                            Constant::F64(i) if type_name == TypeName::INT32.pretty()  => i32::try_roundtrip(*i).map(Constant::I32).or(err),
+                            Constant::F64(i) if type_name == TypeName::INT64.pretty()  => i64::try_roundtrip(*i).map(Constant::I64).or(err),
+                            Constant::F64(i) if type_name == TypeName::UINT32.pretty() => u32::try_roundtrip(*i).map(Constant::U32).or(err),
+                            Constant::F64(i) if type_name == TypeName::UINT64.pretty() => u64::try_roundtrip(*i).map(Constant::U64).or(err),
+                            Constant::F64(i) if type_name == TypeName::FLOAT.pretty()  => f32::try_roundtrip(*i).map(Constant::F32).or(err),
+
+                            other => Ok(other.clone())
                         }
                     }
-                    None => cons.clone(),
+                    None => Ok(cons.clone()),
                 };
-                Expr::Constant(cons, *pos)
+                return cons.map(|c| Expr::Constant(c, *pos))
             }
             Expr::ArrayLit(exprs, _, pos) => match exprs.split_first() {
                 Some((head, tail)) => {
@@ -812,6 +841,33 @@ fn insert_conversion(expr: Expr<TypedAst>, type_: &TypeId, conversion: Conversio
         Conversion::ToVariant => Expr::Call(Callable::Intrinsic(IntrinsicOp::ToVariant, type_.clone()), vec![expr], span),
     }
 }
+
+// Rust doesn't currently implement a roundtrip check for int to float conversion
+trait RoundTrip<T>: Sized {
+    fn try_roundtrip(value: T) -> Result<Self, Error>;
+}
+
+macro_rules! try_roundtrip {
+    ($source:ty, $($target:ty), *) => {$(
+        impl RoundTrip<$source> for $target {
+            fn try_roundtrip(i: $source) -> Result<Self, Error> {
+                let c = i as $target;
+                let r = c as $source;
+                if r != i {
+                    Err(Error::type_error(stringify!($source), stringify!($target), Span::ZERO))
+                } else {
+                    Ok(c)
+                }
+            }
+        }
+    )*}
+}
+try_roundtrip!(i32, f32);
+try_roundtrip!(i64, f32, f64);
+try_roundtrip!(u32, f32);
+try_roundtrip!(u64, f32, f64);
+try_roundtrip!(f32, i32, i64, u32, u64);
+try_roundtrip!(f64, i32, i64, u32, u64, f32);
 
 #[derive(Debug)]
 pub struct TypedAst;

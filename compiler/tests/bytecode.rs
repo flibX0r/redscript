@@ -478,10 +478,10 @@ fn compile_number_literals() {
             b = 4.0;
             b = 5.0d;
             let c: Int32 = 6;
-            let d: Int64 = 7;
+            let d: Int64 = 7e3;
             d = 8l;
             let e: Uint32 = 9u;
-            let f: Uint64 = 10u;
+            let f: Uint64 = 0xFFFF_FFFF_FFFF_FFFF;
         }
         ";
 
@@ -506,7 +506,7 @@ fn compile_number_literals() {
         pat!(I32Const(6)),
         pat!(Assign),
         mem!(Local(d)),
-        pat!(I64Const(7)),
+        pat!(I64Const(7000)),
         pat!(Assign),
         mem!(Local(d)),
         pat!(I64Const(8)),
@@ -515,7 +515,7 @@ fn compile_number_literals() {
         pat!(U32Const(9)),
         pat!(Assign),
         mem!(Local(f)),
-        pat!(U64Const(10)),
+        pat!(U64Const(0xFFFF_FFFF_FFFF_FFFF)),
         pat!(Nop)
     ];
     TestContext::compiled(vec![sources]).unwrap().run("Testing", check)
